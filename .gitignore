@@ -4,6 +4,7 @@ ca.crt
 
 # Log files
 *.log
+copilot_data.json
 
 # Compiled binaries
 copilot-logger
