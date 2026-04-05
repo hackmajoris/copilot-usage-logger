@@ -1,0 +1,23 @@
+# CA files (auto-generated, keep private)
+ca.key
+ca.crt
+
+# Log files
+*.log
+
+# Compiled binaries
+copilot-logger
+copilot-logger.exe
+copilot-usage-logger
+copilot-usage-logger.exe
+
+# GoReleaser dist output
+dist/
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp

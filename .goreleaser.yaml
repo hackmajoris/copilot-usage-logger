@@ -1,0 +1,51 @@
+version: 2
+
+project_name: copilot-usage-logger
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - main: ./copilot-logger.go
+    binary: copilot-logger
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - README.md
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - Merge pull request
+      - Merge branch
+
+release:
+  github:
+    owner: hackmajoris
+    name: copilot-usage-logger
+  draft: false
+  prerelease: auto

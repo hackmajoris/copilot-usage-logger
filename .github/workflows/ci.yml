@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    name: Build & Vet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: Build (linux/amd64)
+        run: go build -o copilot-logger ./copilot-logger.go
+
+      - name: Build (darwin/amd64)
+        run: GOOS=darwin GOARCH=amd64 go build -o /dev/null ./copilot-logger.go
+
+      - name: Build (windows/amd64)
+        run: GOOS=windows GOARCH=amd64 go build -o /dev/null ./copilot-logger.go
