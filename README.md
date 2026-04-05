@@ -91,68 +91,29 @@ go build -o copilot-logger copilot-logger.go
 
 ---
 
-### Step 3 — Generate the CA certificate
+### Step 3 — Generate and trust the CA certificate
 
-Start the proxy once — it will create `ca.crt` and `ca.key`, print a startup message,
-and begin listening. You can stop it immediately with `Ctrl+C` once both files exist.
+Run the `--trust-cert` command. It generates `ca.crt` / `ca.key` if they don't exist,
+then installs the certificate as a trusted root CA in your OS keychain.
 
 ```bash
-# From your working directory:
-copilot-logger          # if installed via go install / pre-built binary on PATH
-# or
-./copilot-logger        # if running the binary directly from the working directory
+copilot-logger --trust-cert
 ```
 
-You should see output like:
+You will be prompted for your password (macOS / Linux) or need to run as Administrator
+(Windows). The command handles all platforms automatically:
 
-```
-2026/04/05 14:00:00 copilot-logger proxy listening on :8080  (task=default)
-2026/04/05 14:00:00 Install ca.crt as a trusted root CA, then point your proxy settings to http://localhost:8080
-2026/04/05 14:00:00 Persistent data store: copilot_data.json
-```
+| OS      | Method                                              |
+|---------|-----------------------------------------------------|
+| macOS   | `sudo security add-trusted-cert` (password prompt)  |
+| Linux   | `sudo update-ca-certificates`                       |
+| Windows | `certutil -addstore` (run terminal as Administrator)|
 
-Two files are now present in your working directory: `ca.crt` and `ca.key`.
+If you regenerate the certificate (e.g. after deleting `ca.crt`), re-run
+`--trust-cert` — it removes the old entry before installing the new one.
 
 > **Keep `ca.key` private.** Anyone with this file can sign certificates trusted by
 > your machine. Never commit it to version control.
-
----
-
-### Step 4 — Trust the CA certificate
-
-This is a one-time step per machine. Install `ca.crt` as a trusted root CA so your
-tools do not reject the proxy's intercepted TLS connections.
-
-**macOS**
-
-```bash
-sudo security add-trusted-cert -d -r trustRoot \
-  -k /Library/Keychains/System.keychain ~/copilot-logger/ca.crt
-```
-
-Then open **Keychain Access**, find "copilot-logger" in the System keychain, and
-confirm it shows "This certificate is marked as trusted for all users".
-
-**Linux — Debian / Ubuntu**
-
-```bash
-sudo cp ~/copilot-logger/ca.crt /usr/local/share/ca-certificates/copilot-logger.crt
-sudo update-ca-certificates
-```
-
-**Linux — RHEL / Fedora / CentOS**
-
-```bash
-sudo cp ~/copilot-logger/ca.crt /etc/pki/ca-trust/source/anchors/copilot-logger.crt
-sudo update-ca-trust
-```
-
-**Windows (PowerShell — run as Administrator)**
-
-```powershell
-Import-Certificate -FilePath "$HOME\copilot-logger\ca.crt" `
-  -CertStoreLocation Cert:\LocalMachine\Root
-```
 
 ---
 
@@ -177,26 +138,35 @@ The proxy is now listening on `http://127.0.0.1:8080`.
 
 ---
 
-### Step 6 — Export proxy settings in your working terminal
+### Step 6 — Set proxy variables in your working terminal
 
 Open a **second terminal** (the one you will use to run your editor, CLI tools, or
-agents). Export the proxy environment variables before launching anything:
+agents) and run:
 
+**macOS / Linux**
 ```bash
-export HTTP_PROXY=http://127.0.0.1:8080
-export HTTPS_PROXY=http://127.0.0.1:8080
-export NO_PROXY=localhost,127.0.0.1
+eval "$(copilot-logger --print-proxy)"
 ```
 
-Verify that your shell inherits these before continuing:
-
-```bash
-echo $HTTPS_PROXY    # should print http://127.0.0.1:8080
+**PowerShell**
+```powershell
+copilot-logger --print-proxy | Invoke-Expression
 ```
 
-> These variables only apply to the current shell session. You need to re-export them
-> each time you open a new terminal, or add them to your shell profile (`~/.zshrc`,
-> `~/.bashrc`, etc.) to make them permanent.
+**CMD**
+```cmd
+for /f "tokens=*" %i in ('copilot-logger --print-proxy') do %i
+```
+
+This sets `HTTP_PROXY`, `HTTPS_PROXY`, `http_proxy`, and `https_proxy` in the
+current session. If you started the proxy on a custom port pass the same flag:
+
+```bash
+eval "$(copilot-logger -addr :9090 --print-proxy)"
+```
+
+> The variables only apply to the current shell session — re-run the command each
+> time you open a new terminal.
 
 ---
 
@@ -250,13 +220,15 @@ aggregated stats.
 
 ## Commands
 
-| Command | Description |
-|---------|-------------|
-| `copilot-logger` | Start the MITM proxy (default mode) |
-| `copilot-logger --summary` | Print current-month usage summary and exit |
-| `copilot-logger --prevmonth` | Print previous-month usage summary and exit |
-| `copilot-logger --version` | Print the application version and exit |
-| `copilot-logger --help` | Print help and exit |
+| Command                          | Description                                                        |
+|----------------------------------|--------------------------------------------------------------------|
+| `copilot-logger`                 | Start the MITM proxy (default mode)                                |
+| `copilot-logger --trust-cert`    | Generate CA cert (if needed) and install it as a trusted root CA            |
+| `copilot-logger --print-proxy`   | Print shell commands to set `HTTP_PROXY`/`HTTPS_PROXY` (use with `eval`)    |
+| `copilot-logger --summary`       | Print current-month usage summary and exit                         |
+| `copilot-logger --prevmonth`     | Print previous-month usage summary and exit                        |
+| `copilot-logger --version`       | Print the application version and exit                             |
+| `copilot-logger --help`          | Print help and exit                                                |
 
 Positional subcommands are also accepted for `summary`, `prevmonth`, and `version`
 (e.g. `copilot-logger summary`).
@@ -276,18 +248,20 @@ copilot-logger \
   -cakey        ca.key
 ```
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `-addr` | `:8080` | TCP address the MITM proxy listens on (e.g. `:8080` or `127.0.0.1:9090`) |
-| `-task` | `default` | Label used to group token-usage stats in the summary log |
-| `-log` | `copilot_usage.log` | Path to the append-only NDJSON file that records every intercepted request |
-| `-summary-file` | `copilot_summary.log` | Path to the summary file rewritten on each request |
-| `-data` | `copilot_data.json` | Path to the persistent JSON store that accumulates stats across all runs |
-| `-cacert` | `ca.crt` | Path to the self-signed CA certificate (created automatically on first run) |
-| `-cakey` | `ca.key` | Path to the CA private key (created automatically on first run — keep secret) |
-| `--summary` | — | Print current-month usage summary and exit |
-| `--prevmonth` | — | Print previous-month usage summary and exit |
-| `--version` | — | Print the application version and exit |
+| Flag            | Default               | Description                                                                   |
+|-----------------|-----------------------|-------------------------------------------------------------------------------|
+| `-addr`         | `:8080`               | TCP address the MITM proxy listens on (e.g. `:8080` or `127.0.0.1:9090`)      |
+| `-task`         | `default`             | Label used to group token-usage stats in the summary log                      |
+| `-log`          | `copilot_usage.log`   | Path to the append-only NDJSON file that records every intercepted request    |
+| `-summary-file` | `copilot_summary.log` | Path to the summary file rewritten on each request                            |
+| `-data`         | `copilot_data.json`   | Path to the persistent JSON store that accumulates stats across all runs      |
+| `-cacert`       | `ca.crt`              | Path to the self-signed CA certificate (created automatically on first run)   |
+| `-cakey`        | `ca.key`              | Path to the CA private key (created automatically on first run — keep secret) |
+| `--trust-cert`  | —                     | Generate CA cert (if needed) and install it as a trusted root CA              |
+| `--print-proxy` | —                     | Print shell commands to set `HTTP_PROXY`/`HTTPS_PROXY` and exit               |
+| `--summary`     | —                     | Print current-month usage summary and exit                                    |
+| `--prevmonth`   | —                     | Print previous-month usage summary and exit                                   |
+| `--version`     | —                     | Print the application version and exit                                        |
 
 ---
 
@@ -435,13 +409,13 @@ request count.
 
 ## Files generated
 
-| File | Description |
-|------|-------------|
-| `ca.crt` | Self-signed CA certificate — install as trusted root (Step 4) |
-| `ca.key` | CA private key — keep private, never commit |
-| `copilot_usage.log` | Append-only per-call log (raw, never overwritten) |
-| `copilot_summary.log` | Human-readable summary, regenerated after every request |
-| `copilot_data.json` | Persistent JSON store — accumulates stats across all runs and tasks |
+| File                  | Description                                                         |
+|-----------------------|---------------------------------------------------------------------|
+| `ca.crt`              | Self-signed CA certificate — install as trusted root (Step 3)       |
+| `ca.key`              | CA private key — keep private, never commit                         |
+| `copiwilot_usage.log` | Append-only per-call log (raw, never overwritten)                   |
+| `copilot_summary.log` | Human-readable summary, regenerated after every request             |
+| `copilot_data.json`   | Persistent JSON store — accumulates stats across all runs and tasks |
 
 Add `ca.key` to your `.gitignore`:
 
@@ -502,4 +476,4 @@ Task "my-feature" already exists in copilot_data.json:
 ## Requirements
 
 - Go 1.21 or later (only needed for `go install` or building from source)
-- The generated `ca.crt` trusted as a root CA on your machine (one-time, Step 4)
+- The generated `ca.crt` trusted as a root CA on your machine (one-time, Step 3 — run `--trust-cert`)

@@ -31,6 +31,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -53,6 +55,8 @@ var (
 	doSummary   = flag.Bool("summary", false, "print current-month usage summary from persistent data store and exit")
 	doPrevMonth = flag.Bool("prevmonth", false, "print previous-month usage summary from persistent data store and exit")
 	doVersion   = flag.Bool("version", false, "print the application version and exit")
+	doTrustCert  = flag.Bool("trust-cert", false, "generate CA cert (if needed) and install it as a trusted root CA in the OS keychain")
+	doPrintProxy = flag.Bool("print-proxy", false, "print shell export commands to configure HTTP_PROXY/HTTPS_PROXY and exit")
 )
 
 const targetHost = "githubcopilot.com"
@@ -898,6 +902,114 @@ func printPrevMonth() {
 	fmt.Println()
 }
 
+// ── cert trust & proxy export helpers ────────────────────
+
+// trustCert generates the CA cert (if absent) and installs it as a trusted
+// root CA in the OS keychain.  On macOS this calls `security add-trusted-cert`
+// which triggers a native password prompt.  On Linux it copies the cert into
+// /usr/local/share/ca-certificates/ and runs update-ca-certificates.
+func trustCert() {
+	// Ensure the cert exists (generate if needed).
+	if _, err := os.Stat(*caCertFile); os.IsNotExist(err) {
+		log.Printf("CA cert not found — generating %s / %s …", *caCertFile, *caKeyFile)
+		if _, _, err := loadOrCreateCA(); err != nil {
+			log.Fatalf("Failed to generate CA: %v", err)
+		}
+		log.Printf("CA cert generated.")
+	}
+
+	absPath, err := os.Getwd()
+	if err != nil {
+		log.Fatalf("Cannot determine working directory: %v", err)
+	}
+	certPath := *caCertFile
+	sep := string(os.PathSeparator)
+	if !strings.HasPrefix(certPath, "/") && !strings.Contains(certPath, ":\\") {
+		certPath = absPath + sep + certPath
+	}
+
+	switch runtime.GOOS {
+	case "darwin":
+		const keychain = "/Library/Keychains/System.keychain"
+		const certName = "copilot-logger CA"
+
+		// Remove any existing cert with the same CN so the new one takes effect.
+		// `security delete-certificate` exits non-zero when nothing is found — ignore that.
+		del := exec.Command("sudo", "security", "delete-certificate",
+			"-c", certName, keychain)
+		del.Stdin = os.Stdin
+		del.Stdout = os.Stdout
+		del.Stderr = os.Stderr
+		_ = del.Run() // intentionally ignore "not found" errors
+
+		fmt.Printf("Installing %s as a trusted root CA (you will be prompted for your password)…\n", certPath)
+		cmd := exec.Command("sudo", "security", "add-trusted-cert", "-d", "-r", "trustRoot",
+			"-k", keychain, certPath)
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			log.Fatalf("security add-trusted-cert failed: %v", err)
+		}
+		fmt.Println("Certificate trusted successfully.")
+
+	case "linux":
+		dest := "/usr/local/share/ca-certificates/copilot-logger-ca.crt"
+		fmt.Printf("Copying %s → %s (sudo required)…\n", certPath, dest)
+		cp := exec.Command("sudo", "cp", certPath, dest)
+		cp.Stdin = os.Stdin
+		cp.Stdout = os.Stdout
+		cp.Stderr = os.Stderr
+		if err := cp.Run(); err != nil {
+			log.Fatalf("sudo cp failed: %v", err)
+		}
+		upd := exec.Command("sudo", "update-ca-certificates")
+		upd.Stdin = os.Stdin
+		upd.Stdout = os.Stdout
+		upd.Stderr = os.Stderr
+		if err := upd.Run(); err != nil {
+			log.Fatalf("update-ca-certificates failed: %v", err)
+		}
+		fmt.Println("Certificate trusted successfully.")
+
+	case "windows":
+		// certutil is available on all modern Windows versions without extra installs.
+		// The binary must be run from an elevated (Administrator) prompt for this to work.
+		fmt.Printf("Installing %s as a trusted root CA (requires Administrator privileges)…\n", certPath)
+		cmd := exec.Command("certutil", "-addstore", "-f", "Root", certPath)
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			log.Fatalf("certutil -addstore failed: %v\n\nMake sure you are running this command as Administrator.", err)
+		}
+		fmt.Println("Certificate trusted successfully.")
+
+	default:
+		log.Fatalf("--trust-cert is not supported on %s — please install %s manually.", runtime.GOOS, certPath)
+	}
+}
+
+// printProxy prints shell commands to configure HTTP(S)_PROXY and exit.
+//
+// Unix/macOS:  eval "$(copilot-logger --print-proxy)"
+// Windows CMD: for /f "tokens=*" %i in ('copilot-logger --print-proxy') do %i
+// PowerShell:  copilot-logger --print-proxy | Invoke-Expression
+func printProxy() {
+	proxyURL := "http://localhost" + *addr
+	if runtime.GOOS == "windows" {
+		fmt.Printf("set HTTP_PROXY=%s\n", proxyURL)
+		fmt.Printf("set HTTPS_PROXY=%s\n", proxyURL)
+		fmt.Printf("set http_proxy=%s\n", proxyURL)
+		fmt.Printf("set https_proxy=%s\n", proxyURL)
+	} else {
+		fmt.Printf("export HTTP_PROXY=%s\n", proxyURL)
+		fmt.Printf("export HTTPS_PROXY=%s\n", proxyURL)
+		fmt.Printf("export http_proxy=%s\n", proxyURL)
+		fmt.Printf("export https_proxy=%s\n", proxyURL)
+	}
+}
+
 // ── main ─────────────────────────────────────────────────
 
 func main() {
@@ -922,18 +1034,37 @@ func main() {
 		fmt.Fprintf(out, "  --summary       print current-month usage summary from persistent data store and exit\n")
 		fmt.Fprintf(out, "  --prevmonth     print previous-month usage summary from persistent data store and exit\n")
 		fmt.Fprintf(out, "  --version       print the application version and exit\n")
+		fmt.Fprintf(out, "  --trust-cert    generate CA cert (if needed) and install it as a trusted root CA\n")
+		fmt.Fprintf(out, "                  macOS: sudo security add-trusted-cert (password prompt)\n")
+		fmt.Fprintf(out, "                  Linux: sudo update-ca-certificates\n")
+		fmt.Fprintf(out, "                  Windows: certutil -addstore (run as Administrator)\n")
+		fmt.Fprintf(out, "  --print-proxy   print shell export/set commands for HTTP_PROXY/HTTPS_PROXY and exit\n")
+		fmt.Fprintf(out, "                  Unix/macOS:  eval \"$(copilot-logger --print-proxy)\"\n")
+		fmt.Fprintf(out, "                  PowerShell:  copilot-logger --print-proxy | Invoke-Expression\n")
+		fmt.Fprintf(out, "                  CMD:         for /f \"tokens=*\" %%i in ('copilot-logger --print-proxy') do %%i\n")
 		fmt.Fprintf(out, "\n")
 		fmt.Fprintf(out, "workflow:\n")
-		fmt.Fprintf(out, "  1. Run the proxy (creates ca.crt/ca.key on first run).\n")
-		fmt.Fprintf(out, "  2. Install ca.crt as a trusted root CA in your OS/browser/editor.\n")
-		fmt.Fprintf(out, "  3. Point HTTP_PROXY / HTTPS_PROXY to http://localhost:8080.\n")
-		fmt.Fprintf(out, "  4. Use GitHub Copilot normally — every request is logged and summarised.\n")
+		fmt.Fprintf(out, "  1. copilot-logger --trust-cert            (first time: generates cert and trusts it)\n")
+		fmt.Fprintf(out, "  2. copilot-logger                         (start the proxy in a dedicated terminal)\n")
+		fmt.Fprintf(out, "  3. eval \"$(copilot-logger --print-proxy)\" (set proxy vars in your working terminal)\n")
 	}
 	flag.Parse()
 
 	// --version: print the build version and exit.
 	if *doVersion || flag.Arg(0) == "version" {
 		fmt.Println(version)
+		return
+	}
+
+	// --trust-cert: generate CA (if needed) and install it as a trusted root.
+	if *doTrustCert || flag.Arg(0) == "trust-cert" {
+		trustCert()
+		return
+	}
+
+	// --print-proxy: emit shell export lines for HTTP(S)_PROXY and exit.
+	if *doPrintProxy || flag.Arg(0) == "print-proxy" {
+		printProxy()
 		return
 	}
 
