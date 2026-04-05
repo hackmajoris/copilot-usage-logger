@@ -37,6 +37,9 @@ import (
 	"time"
 )
 
+// version is set at build time via -ldflags "-X main.version=<tag>".
+var version = "dev"
+
 // ── CONFIG flags ─────────────────────────────────────────
 
 var (
@@ -49,9 +52,10 @@ var (
 	caKeyFile   = flag.String("cakey", "ca.key", "path to the CA private key that signs per-host certificates (created automatically on first run, keep secret)")
 	doSummary   = flag.Bool("summary", false, "print current-month usage summary from persistent data store and exit")
 	doPrevMonth = flag.Bool("prevmonth", false, "print previous-month usage summary from persistent data store and exit")
+	doVersion   = flag.Bool("version", false, "print the application version and exit")
 )
 
-const targetHost = "api.githubcopilot.com"
+const targetHost = "githubcopilot.com"
 
 // ── Model multipliers (official GitHub Copilot paid-plan billing weights) ────
 // Source: https://docs.github.com/en/copilot/managing-copilot/monitoring-usage-and-entitlements/about-premium-requests
@@ -613,11 +617,23 @@ type proxy struct {
 
 func newProxy(caTLS tls.Certificate, caCert *x509.Certificate) *proxy {
 	caKey := caTLS.PrivateKey.(*rsa.PrivateKey)
+
+	// Load the system root CA pool so the upstream TLS transport can verify
+	// certificates signed by system-trusted CAs (e.g. on macOS, Go does not
+	// use the system keychain by default in all configurations).
+	rootCAs, err := x509.SystemCertPool()
+	if err != nil || rootCAs == nil {
+		rootCAs = x509.NewCertPool()
+	}
+
 	return &proxy{
 		caCert: caCert,
 		caKey:  caKey,
 		transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: false},
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: false,
+				RootCAs:            rootCAs,
+			},
 			DialContext: (&net.Dialer{
 				Timeout:   30 * time.Second,
 				KeepAlive: 30 * time.Second,
@@ -888,7 +904,7 @@ func main() {
 	flag.Usage = func() {
 		out := flag.CommandLine.Output()
 		fmt.Fprintf(out, "usage: copilot-logger [-addr ADDR] [-task TASK] [-log FILE] [-data FILE]\n")
-		fmt.Fprintf(out, "                      [-cacert FILE] [-cakey FILE] [-h] [--summary] [--prevmonth]\n")
+		fmt.Fprintf(out, "                      [-cacert FILE] [-cakey FILE] [-h] [--summary] [--prevmonth] [--version]\n")
 		fmt.Fprintf(out, "\n")
 		fmt.Fprintf(out, "HTTPS MITM proxy that intercepts api.githubcopilot.com traffic and logs token usage.\n")
 		fmt.Fprintf(out, "\n")
@@ -905,6 +921,7 @@ func main() {
 		fmt.Fprintf(out, "commands:\n")
 		fmt.Fprintf(out, "  --summary       print current-month usage summary from persistent data store and exit\n")
 		fmt.Fprintf(out, "  --prevmonth     print previous-month usage summary from persistent data store and exit\n")
+		fmt.Fprintf(out, "  --version       print the application version and exit\n")
 		fmt.Fprintf(out, "\n")
 		fmt.Fprintf(out, "workflow:\n")
 		fmt.Fprintf(out, "  1. Run the proxy (creates ca.crt/ca.key on first run).\n")
@@ -913,6 +930,12 @@ func main() {
 		fmt.Fprintf(out, "  4. Use GitHub Copilot normally — every request is logged and summarised.\n")
 	}
 	flag.Parse()
+
+	// --version: print the build version and exit.
+	if *doVersion || flag.Arg(0) == "version" {
+		fmt.Println(version)
+		return
+	}
 
 	// Command flags: --summary / --prevmonth — read the data file and exit.
 	// Also support legacy positional subcommands for backwards compatibility.

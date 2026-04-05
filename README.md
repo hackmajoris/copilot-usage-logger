@@ -18,19 +18,43 @@ No mitmproxy or Python required. Written in Go using only the standard library.
 
 ---
 
-## Installation
+## Quick start
 
-### Option 1: `go install` (requires Go)
+Follow these steps in order. Each step must be completed before the next.
+
+### Step 1 — Choose a working directory
+
+The proxy writes four files on first run (`ca.crt`, `ca.key`, `copilot_usage.log`,
+`copilot_data.json`). Pick a permanent location you control and create it if needed:
+
+```bash
+mkdir -p ~/copilot-logger
+cd ~/copilot-logger
+```
+
+All subsequent commands assume you are inside this directory.
+
+---
+
+### Step 2 — Install the binary
+
+**Option A: `go install` (requires Go 1.21+)**
 
 ```bash
 go install github.com/hackmajoris/copilot-usage-logger@latest
 ```
 
-The binary will be placed in `$(go env GOPATH)/bin/copilot-logger`. Make sure that directory is in your `PATH`.
+The binary lands in `$(go env GOPATH)/bin/copilot-logger`. Make sure that directory
+is on your `PATH`:
 
-### Option 2: Download a pre-built binary
+```bash
+export PATH="$(go env GOPATH)/bin:$PATH"
+```
 
-Go to the [Releases page](https://github.com/hackmajoris/copilot-usage-logger/releases/latest) and download the archive for your OS and architecture:
+**Option B: Download a pre-built binary**
+
+Go to the [Releases page](https://github.com/hackmajoris/copilot-usage-logger/releases/latest)
+and download the archive for your OS and architecture:
 
 | OS      | Architecture             | File                                       |
 |---------|--------------------------|--------------------------------------------|
@@ -41,16 +65,14 @@ Go to the [Releases page](https://github.com/hackmajoris/copilot-usage-logger/re
 | Windows | x86-64                   | `copilot-usage-logger_windows_amd64.zip`   |
 | Windows | ARM64                    | `copilot-usage-logger_windows_arm64.zip`   |
 
-Extract and run:
+Extract into your working directory:
 
 ```bash
 # macOS / Linux
-tar -xzf copilot-usage-logger_darwin_arm64.tar.gz
-./copilot-logger
+tar -xzf copilot-usage-logger_darwin_arm64.tar.gz -C ~/copilot-logger
 
 # Windows (PowerShell)
-Expand-Archive copilot-usage-logger_windows_amd64.zip
-.\copilot-logger.exe
+Expand-Archive copilot-usage-logger_windows_amd64.zip -DestinationPath $HOME\copilot-logger
 ```
 
 Verify the download with `checksums.txt` (included in the release):
@@ -59,125 +81,225 @@ Verify the download with `checksums.txt` (included in the release):
 sha256sum --check checksums.txt
 ```
 
-### Option 3: Build from source (requires Go)
+**Option C: Build from source (requires Go 1.21+)**
 
 ```bash
-git clone https://github.com/hackmajoris/copilot-usage-logger.git
-cd copilot-usage-logger
+git clone https://github.com/hackmajoris/copilot-usage-logger.git ~/copilot-logger
+cd ~/copilot-logger
 go build -o copilot-logger copilot-logger.go
 ```
 
-Or run directly without building:
+---
+
+### Step 3 — Generate the CA certificate
+
+Start the proxy once — it will create `ca.crt` and `ca.key`, print a startup message,
+and begin listening. You can stop it immediately with `Ctrl+C` once both files exist.
 
 ```bash
-go run copilot-logger.go
+# From your working directory:
+copilot-logger          # if installed via go install / pre-built binary on PATH
+# or
+./copilot-logger        # if running the binary directly from the working directory
 ```
 
+You should see output like:
+
+```
+2026/04/05 14:00:00 copilot-logger proxy listening on :8080  (task=default)
+2026/04/05 14:00:00 Install ca.crt as a trusted root CA, then point your proxy settings to http://localhost:8080
+2026/04/05 14:00:00 Persistent data store: copilot_data.json
+```
+
+Two files are now present in your working directory: `ca.crt` and `ca.key`.
+
+> **Keep `ca.key` private.** Anyone with this file can sign certificates trusted by
+> your machine. Never commit it to version control.
+
 ---
 
-## Requirements
+### Step 4 — Trust the CA certificate
 
-- Go 1.21 or later (only for `go install` or building from source)
-- The generated `ca.crt` trusted as a root CA on your machine (one-time setup)
+This is a one-time step per machine. Install `ca.crt` as a trusted root CA so your
+tools do not reject the proxy's intercepted TLS connections.
 
----
-
-## CA trust setup (one-time)
-
-Run the proxy once to generate `ca.crt`, then install it as a trusted root.
-
-### macOS
+**macOS**
 
 ```bash
 sudo security add-trusted-cert -d -r trustRoot \
-  -k /Library/Keychains/System.keychain ca.crt
+  -k /Library/Keychains/System.keychain ~/copilot-logger/ca.crt
 ```
 
-### Linux (Debian/Ubuntu)
+Then open **Keychain Access**, find "copilot-logger" in the System keychain, and
+confirm it shows "This certificate is marked as trusted for all users".
+
+**Linux — Debian / Ubuntu**
 
 ```bash
-sudo cp ca.crt /usr/local/share/ca-certificates/copilot-logger.crt
+sudo cp ~/copilot-logger/ca.crt /usr/local/share/ca-certificates/copilot-logger.crt
 sudo update-ca-certificates
 ```
 
-### Linux (RHEL/Fedora)
+**Linux — RHEL / Fedora / CentOS**
 
 ```bash
-sudo cp ca.crt /etc/pki/ca-trust/source/anchors/copilot-logger.crt
+sudo cp ~/copilot-logger/ca.crt /etc/pki/ca-trust/source/anchors/copilot-logger.crt
 sudo update-ca-trust
 ```
 
-### Windows (PowerShell, run as Administrator)
+**Windows (PowerShell — run as Administrator)**
 
 ```powershell
-Import-Certificate -FilePath ca.crt -CertStoreLocation Cert:\LocalMachine\Root
+Import-Certificate -FilePath "$HOME\copilot-logger\ca.crt" `
+  -CertStoreLocation Cert:\LocalMachine\Root
 ```
 
 ---
 
-## Usage
+### Step 5 — Start the proxy
 
-### Basic (default task, port 8080)
+Open a dedicated terminal window (or a tmux/screen session) in your working directory
+and start the proxy. Leave this terminal running for as long as you want to capture
+usage.
 
 ```bash
-./copilot-logger
+cd ~/copilot-logger
+copilot-logger
 ```
 
-### Label a task
+To label the session so you can group stats later:
 
 ```bash
-./copilot-logger -task my-feature
+copilot-logger -task my-feature
 ```
 
-### Custom port and task
+The proxy is now listening on `http://127.0.0.1:8080`.
+
+---
+
+### Step 6 — Export proxy settings in your working terminal
+
+Open a **second terminal** (the one you will use to run your editor, CLI tools, or
+agents). Export the proxy environment variables before launching anything:
 
 ```bash
-./copilot-logger -addr :9090 -task sprint-42
+export HTTP_PROXY=http://127.0.0.1:8080
+export HTTPS_PROXY=http://127.0.0.1:8080
+export NO_PROXY=localhost,127.0.0.1
 ```
 
-### View usage stats
+Verify that your shell inherits these before continuing:
 
 ```bash
-# Current month summary
-./copilot-logger --summary
-
-# Previous month summary
-./copilot-logger --prevmonth
+echo $HTTPS_PROXY    # should print http://127.0.0.1:8080
 ```
 
-### All flags
+> These variables only apply to the current shell session. You need to re-export them
+> each time you open a new terminal, or add them to your shell profile (`~/.zshrc`,
+> `~/.bashrc`, etc.) to make them permanent.
+
+---
+
+### Step 7 — Open GitHub Copilot or OpenCode
+
+With the proxy running and the environment variables set, start your AI tool in the
+same terminal where you exported the proxy settings:
+
+**VS Code with GitHub Copilot**
+
+Add to VS Code `settings.json` (Cmd+Shift+P → "Open User Settings (JSON)"):
+
+```json
+{
+  "http.proxy": "http://127.0.0.1:8080",
+  "http.proxyStrictSSL": true,
+  "github.copilot.advanced": {
+    "debug.useNodeFetcher": true,
+    "debug.chatOverrideProxyUrl": "http://127.0.0.1:8080"
+  }
+}
+```
+
+Then launch VS Code from the terminal where you exported the proxy variables:
 
 ```bash
-./copilot-logger \
-  -addr   :8080             \
-  -task   my-feature        \
-  -log    copilot_usage.log \
-  -data   copilot_data.json \
-  -cacert ca.crt            \
-  -cakey  ca.key
+code .
+```
+
+**OpenCode (CLI)**
+
+OpenCode picks up `HTTP_PROXY` / `HTTPS_PROXY` automatically. Just launch it from
+the same terminal:
+
+```bash
+opencode
+```
+
+**Any other CLI tool**
+
+Any tool that respects the standard `HTTP_PROXY` / `HTTPS_PROXY` environment variables
+will be captured automatically once those are set.
+
+---
+
+You should now see log lines appearing in the proxy terminal as Copilot requests are
+intercepted. Check `copilot_usage.log` or run `copilot-logger --summary` to view
+aggregated stats.
+
+---
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `copilot-logger` | Start the MITM proxy (default mode) |
+| `copilot-logger --summary` | Print current-month usage summary and exit |
+| `copilot-logger --prevmonth` | Print previous-month usage summary and exit |
+| `copilot-logger --version` | Print the application version and exit |
+| `copilot-logger --help` | Print help and exit |
+
+Positional subcommands are also accepted for `summary`, `prevmonth`, and `version`
+(e.g. `copilot-logger summary`).
+
+---
+
+## All flags
+
+```bash
+copilot-logger \
+  -addr         :8080              \
+  -task         my-feature         \
+  -log          copilot_usage.log  \
+  -summary-file copilot_summary.log \
+  -data         copilot_data.json  \
+  -cacert       ca.crt             \
+  -cakey        ca.key
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-addr` | `:8080` | TCP address the MITM proxy listens on (e.g. `:8080` or `127.0.0.1:9090`) |
-| `-task` | `default` | Label used to group token-usage stats in the summary log (e.g. `feature-branch` or `sprint-42`) |
-| `-log` | `copilot_usage.log` | Path to the append-only NDJSON file that records every intercepted request and response |
+| `-task` | `default` | Label used to group token-usage stats in the summary log |
+| `-log` | `copilot_usage.log` | Path to the append-only NDJSON file that records every intercepted request |
+| `-summary-file` | `copilot_summary.log` | Path to the summary file rewritten on each request |
 | `-data` | `copilot_data.json` | Path to the persistent JSON store that accumulates stats across all runs |
-| `-summary-file` | `copilot_summary.log` | Path to the summary file rewritten on each request with aggregated per-model token counts |
-| `-cacert` | `ca.crt` | Path to the self-signed CA certificate used to intercept TLS traffic (created automatically on first run) |
-| `-cakey` | `ca.key` | Path to the CA private key that signs per-host certificates (created automatically on first run — keep secret) |
+| `-cacert` | `ca.crt` | Path to the self-signed CA certificate (created automatically on first run) |
+| `-cakey` | `ca.key` | Path to the CA private key (created automatically on first run — keep secret) |
 | `--summary` | — | Print current-month usage summary and exit |
 | `--prevmonth` | — | Print previous-month usage summary and exit |
+| `--version` | — | Print the application version and exit |
 
 ---
 
 ## Docker container usage
 
-If you run an agent or tool inside a Docker container and want it to go through the proxy, you need to:
+If you run an agent or tool inside a Docker container and want it to go through the
+proxy, you need to:
 
 1. Copy `ca.crt` (generated on first run) into your Docker build context.
 2. Trust it in the image.
-3. Point the container at the host proxy using `host.docker.internal` (Docker Desktop on Mac/Windows) or `172.17.0.1` (native Linux Docker).
+3. Point the container at the host proxy using `host.docker.internal` (Docker Desktop
+   on Mac/Windows) or `172.17.0.1` (native Linux Docker).
 
 ### Dockerfile snippet
 
@@ -200,16 +322,6 @@ docker run \
   your-image
 ```
 
-Or if using a wrapper like `ralphex-dk`:
-
-```bash
-ralphex-dk \
-  -E SSL_CERT_FILE=/usr/local/share/ca-certificates/copilot-logger.crt \
-  -E HTTP_PROXY=http://host.docker.internal:8080 \
-  -E HTTPS_PROXY=http://host.docker.internal:8080 \
-  -E NO_PROXY=localhost,127.0.0.1
-```
-
 ### host.docker.internal vs 172.17.0.1
 
 | Environment                    | Host address to use                   |
@@ -217,41 +329,14 @@ ralphex-dk \
 | Docker Desktop (Mac / Windows) | `host.docker.internal`                |
 | Native Linux Docker            | `172.17.0.1` (default bridge gateway) |
 
-On Docker Desktop for Mac, containers run inside a Linux VM and cannot reach the host at `172.17.0.1`. Use `host.docker.internal` instead — it always resolves to the correct host IP.
+On Docker Desktop for Mac, containers run inside a Linux VM and cannot reach the host
+at `172.17.0.1`. Use `host.docker.internal` instead — it always resolves to the
+correct host IP.
 
 Verify the proxy is reachable before troubleshooting TLS:
 
 ```bash
 docker run --rm alpine sh -c "apk add --no-cache netcat-openbsd && nc -zv host.docker.internal 8080"
-```
-
----
-
-## Proxy configuration
-
-Point your HTTP and HTTPS proxy settings at the running proxy.
-
-### Shell environment
-
-```bash
-export HTTP_PROXY=http://127.0.0.1:8080
-export HTTPS_PROXY=http://127.0.0.1:8080
-```
-
-### VS Code (`settings.json`)
-
-```json
-"http.proxy": "http://127.0.0.1:8080",
-"http.proxyStrictSSL": true
-```
-
-### GitHub Copilot extension proxy (VS Code `settings.json`)
-
-```json
-"github.copilot.advanced": {
-  "debug.useNodeFetcher": true,
-  "debug.chatOverrideProxyUrl": "http://127.0.0.1:8080"
-}
 ```
 
 ---
@@ -275,7 +360,8 @@ Append-only log of every intercepted POST request and its parsed response.
 
 ### `copilot_summary.log`
 
-Overwritten after every response with the latest aggregated stats. The MTD (month-to-date) section appears first, followed by all-time totals.
+Overwritten after every response with the latest aggregated stats. The MTD
+(month-to-date) section appears first, followed by all-time totals.
 
 ```
 ============================================================
@@ -306,7 +392,8 @@ COPILOT USAGE SUMMARY  —  current month: 2026-04
 GitHub Copilot bills some models as **premium requests** with a per-model multiplier.
 The logger tracks the weighted total for each call and accumulates it in the summary.
 
-Multipliers are sourced from the [official GitHub Copilot documentation](https://docs.github.com/en/copilot/managing-copilot/monitoring-usage-and-entitlements/about-premium-requests).
+Multipliers are sourced from the
+[official GitHub Copilot documentation](https://docs.github.com/en/copilot/managing-copilot/monitoring-usage-and-entitlements/about-premium-requests).
 
 | Model                                | Multiplier (paid plans) | Multiplier (Copilot Free) |
 |--------------------------------------|-------------------------|---------------------------|
@@ -341,7 +428,8 @@ Models with multiplier **0** are included in the base plan at no premium cost.
 Models listed as **Not applicable** for free plan are not available on the Copilot Free tier.
 Unknown models default to a multiplier of **1**.
 
-The summary log shows the **weighted total** (sum of per-call multipliers), not a raw request count.
+The summary log shows the **weighted total** (sum of per-call multipliers), not a raw
+request count.
 
 ---
 
@@ -349,11 +437,11 @@ The summary log shows the **weighted total** (sum of per-call multipliers), not 
 
 | File | Description |
 |------|-------------|
-| `ca.crt` | Self-signed CA certificate — install as trusted root |
+| `ca.crt` | Self-signed CA certificate — install as trusted root (Step 4) |
 | `ca.key` | CA private key — keep private, never commit |
 | `copilot_usage.log` | Append-only per-call log (raw, never overwritten) |
-| `copilot_summary.log` | Human-readable summary, regenerated from the JSON store after every request |
-| `copilot_data.json` | Persistent JSON store — single source of truth, accumulates stats across all runs and tasks |
+| `copilot_summary.log` | Human-readable summary, regenerated after every request |
+| `copilot_data.json` | Persistent JSON store — accumulates stats across all runs and tasks |
 
 Add `ca.key` to your `.gitignore`:
 
@@ -380,17 +468,19 @@ All stats are accumulated in `copilot_data.json` across runs. The file is struct
     "last_seen":  "2026-04-05 17:30:00"
   },
   "tasks": {
-    "my-feature": { "total_calls": 8, ... },
-    "sprint-42":  { "total_calls": 4, ... }
+    "my-feature": { "total_calls": 8, "..." : "..." },
+    "sprint-42":  { "total_calls": 4, "..." : "..." }
   },
   "monthly": {
-    "2026-03": { "total_calls": 5, ... },
-    "2026-04": { "total_calls": 7, ... }
+    "2026-03": { "total_calls": 5, "..." : "..." },
+    "2026-04": { "total_calls": 7, "..." : "..." }
   }
 }
 ```
 
-The `monthly` map retains the **current month and the previous month only** — older entries are pruned automatically on each flush. This gives you a rolling month-over-month comparison without unbounded growth of the data file.
+The `monthly` map retains the **current month and the previous month only** — older
+entries are pruned automatically on each flush. This gives you a rolling
+month-over-month comparison without unbounded growth of the data file.
 
 ### Same task name on restart
 
@@ -406,5 +496,10 @@ Task "my-feature" already exists in copilot_data.json:
 - **A** — new calls are added to the existing totals (default workflow).
 - **R** — the task record is wiped and starts from zero.
 - **C** — the proxy exits without starting.
-<!---->
 
+---
+
+## Requirements
+
+- Go 1.21 or later (only needed for `go install` or building from source)
+- The generated `ca.crt` trusted as a root CA on your machine (one-time, Step 4)
