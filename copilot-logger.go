@@ -32,6 +32,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"sort"
@@ -54,22 +55,76 @@ func resolvedVersion() string {
 	return version
 }
 
+// ── Config directory ──────────────────────────────────────
+
+// defaultConfigDir returns the platform-appropriate default directory for
+// copilot-logger's persistent files:
+//
+//   - Linux / macOS: $XDG_CONFIG_HOME/copilot-logger  (falls back to ~/.config/copilot-logger)
+//   - Windows:       %APPDATA%\copilot-logger
+//
+// The caller is responsible for creating the directory if it doesn't exist.
+func defaultConfigDir() string {
+	switch runtime.GOOS {
+	case "windows":
+		if appdata := os.Getenv("APPDATA"); appdata != "" {
+			return filepath.Join(appdata, "copilot-logger")
+		}
+	default:
+		if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+			return filepath.Join(xdg, "copilot-logger")
+		}
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, ".config", "copilot-logger")
+		}
+	}
+	// Fallback: current working directory (original behaviour).
+	return "."
+}
+
+// ensureConfigDir creates dir (and any parents) if it does not already exist.
+func ensureConfigDir(dir string) error {
+	if dir == "." {
+		return nil
+	}
+	return os.MkdirAll(dir, 0700)
+}
+
 // ── CONFIG flags ─────────────────────────────────────────
 
+// Flag variables are declared as plain *string/*bool so that init() can
+// compute the config-dir-relative defaults before flag.Parse() is called.
 var (
-	addr        = flag.String("addr", ":8080", "TCP address the MITM proxy listens on (e.g. :8080 or 127.0.0.1:9090)")
-	taskName    = flag.String("task", "default", "label used to group token-usage stats in the summary log (e.g. feature-branch or sprint-42)")
-	logFile     = flag.String("log", "copilot_usage.log", "path to the append-only NDJSON file that records every intercepted request and response")
-	summaryFile = flag.String("summary-file", "copilot_summary.log", "path to the summary file that is rewritten on each request with aggregated per-model token counts")
-	dataFile    = flag.String("data", "copilot_data.json", "path to the persistent JSON store that accumulates stats across all runs")
-	caCertFile  = flag.String("cacert", "ca.crt", "path to the self-signed CA certificate used to intercept TLS traffic (created automatically on first run)")
-	caKeyFile   = flag.String("cakey", "ca.key", "path to the CA private key that signs per-host certificates (created automatically on first run, keep secret)")
-	doSummary   = flag.Bool("summary", false, "print current-month usage summary from persistent data store and exit")
-	doPrevMonth = flag.Bool("prevmonth", false, "print previous-month usage summary from persistent data store and exit")
-	doVersion   = flag.Bool("version", false, "print the application version and exit")
-	doTrustCert  = flag.Bool("trust-cert", false, "generate CA cert (if needed) and install it as a trusted root CA in the OS keychain")
-	doPrintProxy = flag.Bool("print-proxy", false, "print shell export commands to configure HTTP_PROXY/HTTPS_PROXY and exit")
+	addr         *string
+	taskName     *string
+	logFile      *string
+	summaryFile  *string
+	dataFile     *string
+	caCertFile   *string
+	caKeyFile    *string
+	doSummary    *bool
+	doPrevMonth  *bool
+	doVersion    *bool
+	doTrustCert  *bool
+	doPrintProxy *bool
 )
+
+func init() {
+	cfgDir := defaultConfigDir()
+
+	addr = flag.String("addr", ":8080", "TCP address the MITM proxy listens on (e.g. :8080 or 127.0.0.1:9090)")
+	taskName = flag.String("task", "default", "label used to group token-usage stats in the summary log (e.g. feature-branch or sprint-42)")
+	logFile = flag.String("log", filepath.Join(cfgDir, "copilot_usage.log"), "path to the append-only NDJSON file that records every intercepted request and response")
+	summaryFile = flag.String("summary-file", filepath.Join(cfgDir, "copilot_summary.log"), "path to the summary file that is rewritten on each request with aggregated per-model token counts")
+	dataFile = flag.String("data", filepath.Join(cfgDir, "copilot_data.json"), "path to the persistent JSON store that accumulates stats across all runs")
+	caCertFile = flag.String("cacert", filepath.Join(cfgDir, "ca.crt"), "path to the self-signed CA certificate used to intercept TLS traffic (created automatically on first run)")
+	caKeyFile = flag.String("cakey", filepath.Join(cfgDir, "ca.key"), "path to the CA private key that signs per-host certificates (created automatically on first run, keep secret)")
+	doSummary = flag.Bool("summary", false, "print current-month usage summary from persistent data store and exit")
+	doPrevMonth = flag.Bool("prevmonth", false, "print previous-month usage summary from persistent data store and exit")
+	doVersion = flag.Bool("version", false, "print the application version and exit")
+	doTrustCert = flag.Bool("trust-cert", false, "generate CA cert (if needed) and install it as a trusted root CA in the OS keychain")
+	doPrintProxy = flag.Bool("print-proxy", false, "print shell export commands to configure HTTP_PROXY/HTTPS_PROXY and exit")
+}
 
 const targetHost = "githubcopilot.com"
 
@@ -1032,14 +1087,18 @@ func main() {
 		fmt.Fprintf(out, "\n")
 		fmt.Fprintf(out, "HTTPS MITM proxy that intercepts api.githubcopilot.com traffic and logs token usage.\n")
 		fmt.Fprintf(out, "\n")
+		fmt.Fprintf(out, "config directory (default location for all files):\n")
+		fmt.Fprintf(out, "  %s\n", defaultConfigDir())
+		fmt.Fprintf(out, "  Override via $XDG_CONFIG_HOME (Linux/macOS) or %%APPDATA%% (Windows).\n")
+		fmt.Fprintf(out, "\n")
 		fmt.Fprintf(out, "options:\n")
 		fmt.Fprintf(out, "  -addr ADDR      TCP address the proxy listens on (default: :8080)\n")
 		fmt.Fprintf(out, "  -task TASK      label used to group token-usage stats (default: \"default\")\n")
-		fmt.Fprintf(out, "  -log FILE       path to the append-only NDJSON log file (default: copilot_usage.log)\n")
-		fmt.Fprintf(out, "  -summary-file FILE  path to the summary file rewritten on each request (default: copilot_summary.log)\n")
-		fmt.Fprintf(out, "  -data FILE      path to the persistent JSON store accumulating stats across runs (default: copilot_data.json)\n")
-		fmt.Fprintf(out, "  -cacert FILE    path to the self-signed CA certificate (default: ca.crt)\n")
-		fmt.Fprintf(out, "  -cakey FILE     path to the CA private key (default: ca.key)\n")
+		fmt.Fprintf(out, "  -log FILE       path to the append-only NDJSON log file\n")
+		fmt.Fprintf(out, "  -summary-file FILE  path to the summary file rewritten on each request\n")
+		fmt.Fprintf(out, "  -data FILE      path to the persistent JSON store accumulating stats across runs\n")
+		fmt.Fprintf(out, "  -cacert FILE    path to the self-signed CA certificate\n")
+		fmt.Fprintf(out, "  -cakey FILE     path to the CA private key\n")
 		fmt.Fprintf(out, "  -h, --help      show this help message and exit\n")
 		fmt.Fprintf(out, "\n")
 		fmt.Fprintf(out, "commands:\n")
@@ -1061,6 +1120,13 @@ func main() {
 		fmt.Fprintf(out, "  3. eval \"$(copilot-logger --print-proxy)\" (set proxy vars in your working terminal)\n")
 	}
 	flag.Parse()
+
+	// Ensure the config directory exists before any file is opened.
+	// We derive it from the resolved -data flag path (its parent directory),
+	// so explicit -data overrides are also respected.
+	if err := ensureConfigDir(filepath.Dir(*dataFile)); err != nil {
+		log.Fatalf("Failed to create config directory: %v", err)
+	}
 
 	// --version: print the build version and exit.
 	if *doVersion || flag.Arg(0) == "version" {

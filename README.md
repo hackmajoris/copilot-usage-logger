@@ -10,7 +10,7 @@ No mitmproxy or Python required. Written in Go using only the standard library.
 ## How it works
 
 1. Listens as an HTTP/HTTPS proxy on a local port.
-2. On first run, generates a self-signed CA (`ca.crt` / `ca.key`).
+2. On first run, generates a self-signed CA (`ca.crt` / `ca.key`) in the config directory.
 3. When a CONNECT tunnel is opened to `api.githubcopilot.com`, it performs a MITM:
    signs a leaf certificate on the fly and decrypts the TLS stream.
 4. POST responses are parsed for SSE `data:` lines containing `usage` fields.
@@ -22,21 +22,7 @@ No mitmproxy or Python required. Written in Go using only the standard library.
 
 Follow these steps in order. Each step must be completed before the next.
 
-### Step 1 — Choose a working directory
-
-The proxy writes four files on first run (`ca.crt`, `ca.key`, `copilot_usage.log`,
-`copilot_data.json`). Pick a permanent location you control and create it if needed:
-
-```bash
-mkdir -p ~/copilot-logger
-cd ~/copilot-logger
-```
-
-All subsequent commands assume you are inside this directory.
-
----
-
-### Step 2 — Install the binary
+### Step 1 — Install the binary
 
 **Option A: `go install` (requires Go 1.21+)**
 
@@ -84,17 +70,18 @@ sha256sum --check checksums.txt
 **Option C: Build from source (requires Go 1.21+)**
 
 ```bash
-git clone https://github.com/hackmajoris/copilot-usage-logger.git ~/copilot-logger
-cd ~/copilot-logger
+git clone https://github.com/hackmajoris/copilot-usage-logger.git
+cd copilot-usage-logger
 go build -o copilot-logger copilot-logger.go
 ```
 
 ---
 
-### Step 3 — Generate and trust the CA certificate
+### Step 2 — Generate and trust the CA certificate
 
-Run the `--trust-cert` command. It generates `ca.crt` / `ca.key` if they don't exist,
-then installs the certificate as a trusted root CA in your OS keychain.
+Run the `--trust-cert` command. It generates `ca.crt` / `ca.key` in the
+[config directory](#config-directory) if they don't exist, then installs the certificate
+as a trusted root CA in your OS keychain.
 
 ```bash
 copilot-logger --trust-cert
@@ -117,14 +104,12 @@ If you regenerate the certificate (e.g. after deleting `ca.crt`), re-run
 
 ---
 
-### Step 5 — Start the proxy
+### Step 3 — Start the proxy
 
-Open a dedicated terminal window (or a tmux/screen session) in your working directory
-and start the proxy. Leave this terminal running for as long as you want to capture
-usage.
+Open a dedicated terminal window (or a tmux/screen session) and start the proxy.
+Leave this terminal running for as long as you want to capture usage.
 
 ```bash
-cd ~/copilot-logger
 copilot-logger
 ```
 
@@ -138,7 +123,7 @@ The proxy is now listening on `http://127.0.0.1:8080`.
 
 ---
 
-### Step 6 — Set proxy variables in your working terminal
+### Step 4 — Set proxy variables in your working terminal
 
 Open a **second terminal** (the one you will use to run your editor, CLI tools, or
 agents) and run:
@@ -170,7 +155,7 @@ eval "$(copilot-logger -addr :9090 --print-proxy)"
 
 ---
 
-### Step 7 — Open GitHub Copilot or OpenCode
+### Step 5 — Open GitHub Copilot or OpenCode
 
 With the proxy running and the environment variables set, start your AI tool in the
 same terminal where you exported the proxy settings:
@@ -213,8 +198,26 @@ will be captured automatically once those are set.
 ---
 
 You should now see log lines appearing in the proxy terminal as Copilot requests are
-intercepted. Check `copilot_usage.log` or run `copilot-logger --summary` to view
-aggregated stats.
+intercepted. Check the summary log or run `copilot-logger --summary` from any directory
+to view aggregated stats.
+
+---
+
+## Config directory
+
+All persistent files are stored in a single platform-specific directory — no need to
+`cd` anywhere before running `copilot-logger --summary` or any other command.
+
+| Platform       | Default location                                      |
+|----------------|-------------------------------------------------------|
+| Linux / macOS  | `$XDG_CONFIG_HOME/copilot-logger` (falls back to `~/.config/copilot-logger`) |
+| Windows        | `%APPDATA%\copilot-logger`                            |
+
+Override the base directory by setting `$XDG_CONFIG_HOME` (Linux/macOS) or `%APPDATA%`
+(Windows), or override individual file paths with the corresponding flags (see
+[All flags](#all-flags)).
+
+
 
 ---
 
@@ -239,29 +242,31 @@ Positional subcommands are also accepted for `summary`, `prevmonth`, and `versio
 
 ```bash
 copilot-logger \
-  -addr         :8080              \
-  -task         my-feature         \
-  -log          copilot_usage.log  \
-  -summary-file copilot_summary.log \
-  -data         copilot_data.json  \
-  -cacert       ca.crt             \
-  -cakey        ca.key
+  -addr         :8080                                    \
+  -task         my-feature                               \
+  -log          ~/.config/copilot-logger/copilot_usage.log   \
+  -summary-file ~/.config/copilot-logger/copilot_summary.log \
+  -data         ~/.config/copilot-logger/copilot_data.json   \
+  -cacert       ~/.config/copilot-logger/ca.crt              \
+  -cakey        ~/.config/copilot-logger/ca.key
 ```
 
-| Flag            | Default               | Description                                                                   |
-|-----------------|-----------------------|-------------------------------------------------------------------------------|
-| `-addr`         | `:8080`               | TCP address the MITM proxy listens on (e.g. `:8080` or `127.0.0.1:9090`)      |
-| `-task`         | `default`             | Label used to group token-usage stats in the summary log                      |
-| `-log`          | `copilot_usage.log`   | Path to the append-only NDJSON file that records every intercepted request    |
-| `-summary-file` | `copilot_summary.log` | Path to the summary file rewritten on each request                            |
-| `-data`         | `copilot_data.json`   | Path to the persistent JSON store that accumulates stats across all runs      |
-| `-cacert`       | `ca.crt`              | Path to the self-signed CA certificate (created automatically on first run)   |
-| `-cakey`        | `ca.key`              | Path to the CA private key (created automatically on first run — keep secret) |
-| `--trust-cert`  | —                     | Generate CA cert (if needed) and install it as a trusted root CA              |
-| `--print-proxy` | —                     | Print shell commands to set `HTTP_PROXY`/`HTTPS_PROXY` and exit               |
-| `--summary`     | —                     | Print current-month usage summary and exit                                    |
-| `--prevmonth`   | —                     | Print previous-month usage summary and exit                                   |
-| `--version`     | —                     | Print the application version and exit                                        |
+| Flag            | Default                             | Description                                                                   |
+|-----------------|-------------------------------------|-------------------------------------------------------------------------------|
+| `-addr`         | `:8080`                             | TCP address the MITM proxy listens on (e.g. `:8080` or `127.0.0.1:9090`)      |
+| `-task`         | `default`                           | Label used to group token-usage stats in the summary log                      |
+| `-log`          | `<config dir>/copilot_usage.log`    | Path to the append-only NDJSON file that records every intercepted request    |
+| `-summary-file` | `<config dir>/copilot_summary.log`  | Path to the summary file rewritten on each request                            |
+| `-data`         | `<config dir>/copilot_data.json`    | Path to the persistent JSON store that accumulates stats across all runs      |
+| `-cacert`       | `<config dir>/ca.crt`               | Path to the self-signed CA certificate (created automatically on first run)   |
+| `-cakey`        | `<config dir>/ca.key`               | Path to the CA private key (created automatically on first run — keep secret) |
+| `--trust-cert`  | —                                   | Generate CA cert (if needed) and install it as a trusted root CA              |
+| `--print-proxy` | —                                   | Print shell commands to set `HTTP_PROXY`/`HTTPS_PROXY` and exit               |
+| `--summary`     | —                                   | Print current-month usage summary and exit                                    |
+| `--prevmonth`   | —                                   | Print previous-month usage summary and exit                                   |
+| `--version`     | —                                   | Print the application version and exit                                        |
+
+`<config dir>` refers to the [platform-specific config directory](#config-directory).
 
 ---
 
@@ -270,7 +275,7 @@ copilot-logger \
 If you run an agent or tool inside a Docker container and want it to go through the
 proxy, you need to:
 
-1. Copy `ca.crt` (generated on first run) into your Docker build context.
+1. Copy `ca.crt` from the [config directory](#config-directory) into your Docker build context.
 2. Trust it in the image.
 3. Point the container at the host proxy using `host.docker.internal` (Docker Desktop
    on Mac/Windows) or `172.17.0.1` (native Linux Docker).
