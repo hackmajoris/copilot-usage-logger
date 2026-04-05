@@ -21,6 +21,9 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      - name: Test
+        run: go test -race -count=1 ./...
+
       - name: Build (linux/amd64)
         run: go build -o copilot-logger ./copilot-logger.go
 

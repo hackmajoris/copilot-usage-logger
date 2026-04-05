@@ -40,15 +40,15 @@ import (
 // ── CONFIG flags ─────────────────────────────────────────
 
 var (
-	addr         = flag.String("addr", ":8080", "TCP address the MITM proxy listens on (e.g. :8080 or 127.0.0.1:9090)")
-	taskName     = flag.String("task", "default", "label used to group token-usage stats in the summary log (e.g. feature-branch or sprint-42)")
-	logFile      = flag.String("log", "copilot_usage.log", "path to the append-only NDJSON file that records every intercepted request and response")
-	summaryFile  = flag.String("summary-file", "copilot_summary.log", "path to the summary file that is rewritten on each request with aggregated per-model token counts")
-	dataFile     = flag.String("data", "copilot_data.json", "path to the persistent JSON store that accumulates stats across all runs")
-	caCertFile   = flag.String("cacert", "ca.crt", "path to the self-signed CA certificate used to intercept TLS traffic (created automatically on first run)")
-	caKeyFile    = flag.String("cakey", "ca.key", "path to the CA private key that signs per-host certificates (created automatically on first run, keep secret)")
-	doSummary    = flag.Bool("summary", false, "print current-month usage summary from persistent data store and exit")
-	doPrevMonth  = flag.Bool("prevmonth", false, "print previous-month usage summary from persistent data store and exit")
+	addr        = flag.String("addr", ":8080", "TCP address the MITM proxy listens on (e.g. :8080 or 127.0.0.1:9090)")
+	taskName    = flag.String("task", "default", "label used to group token-usage stats in the summary log (e.g. feature-branch or sprint-42)")
+	logFile     = flag.String("log", "copilot_usage.log", "path to the append-only NDJSON file that records every intercepted request and response")
+	summaryFile = flag.String("summary-file", "copilot_summary.log", "path to the summary file that is rewritten on each request with aggregated per-model token counts")
+	dataFile    = flag.String("data", "copilot_data.json", "path to the persistent JSON store that accumulates stats across all runs")
+	caCertFile  = flag.String("cacert", "ca.crt", "path to the self-signed CA certificate used to intercept TLS traffic (created automatically on first run)")
+	caKeyFile   = flag.String("cakey", "ca.key", "path to the CA private key that signs per-host certificates (created automatically on first run, keep secret)")
+	doSummary   = flag.Bool("summary", false, "print current-month usage summary from persistent data store and exit")
+	doPrevMonth = flag.Bool("prevmonth", false, "print previous-month usage summary from persistent data store and exit")
 )
 
 const targetHost = "api.githubcopilot.com"
@@ -124,10 +124,8 @@ func premiumMultiplier(model string) float64 {
 
 // ── Persistent JSON store ─────────────────────────────────
 //
-// copilot_data.json is the single source of truth.  It is loaded at startup,
-// updated after every intercepted response, and used to regenerate the
-// human-readable summary log.  In-memory Stats are kept in sync so that the
-// hot path (processResponseBody) never needs to re-read the file.
+// copilot_data.json is the single source of truth for both in-memory and
+// persisted state.  storeMu protects all reads and writes to store.
 
 // TaskRecord holds all accumulated stats for one named task.
 type TaskRecord struct {
@@ -212,11 +210,13 @@ func loadStore() error {
 	return nil
 }
 
+// saveStore marshals the store under the lock and writes to disk outside it
+// to keep the critical section short.
 func saveStore() {
 	storeMu.Lock()
-	defer storeMu.Unlock()
-
 	data, err := json.MarshalIndent(store, "", "  ")
+	storeMu.Unlock()
+
 	if err != nil {
 		log.Printf("saveStore marshal error: %v", err)
 		return
@@ -237,6 +237,24 @@ func getOrCreateTaskRecord(name string) *TaskRecord {
 	return tr
 }
 
+// getOrCreateMonthlyRecord returns the monthly record for key, pruning stale
+// months (keeping only the current and previous month).
+// Must be called with storeMu held.
+func getOrCreateMonthlyRecord(monthKey string) *TaskRecord {
+	prevMonth := time.Now().AddDate(0, -1, 0).Format("2006-01")
+	for k := range store.Monthly {
+		if k != monthKey && k != prevMonth {
+			delete(store.Monthly, k)
+		}
+	}
+	if mr, ok := store.Monthly[monthKey]; ok {
+		return mr
+	}
+	mr := newTaskRecord()
+	store.Monthly[monthKey] = mr
+	return mr
+}
+
 // promptExistingTask asks the user what to do when the chosen task name already
 // has data in the store.  Returns true if startup should continue.
 func promptExistingTask(name string, tr *TaskRecord) bool {
@@ -248,17 +266,19 @@ func promptExistingTask(name string, tr *TaskRecord) bool {
 
 	reader := bufio.NewReader(os.Stdin)
 	for {
-		line, _ := reader.ReadString('\n')
-		line = strings.TrimSpace(strings.ToLower(line))
-		switch line {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "→ Read error, cancelling.")
+			return false
+		}
+		switch strings.TrimSpace(strings.ToLower(line)) {
 		case "a", "aggregate":
 			fmt.Fprintln(os.Stderr, "→ Aggregating into existing task.")
 			return true
 		case "r", "reset":
 			fmt.Fprintln(os.Stderr, "→ Resetting task data.")
 			storeMu.Lock()
-			fresh := newTaskRecord()
-			store.Tasks[name] = fresh
+			store.Tasks[name] = newTaskRecord()
 			storeMu.Unlock()
 			return true
 		case "c", "cancel":
@@ -270,58 +290,52 @@ func promptExistingTask(name string, tr *TaskRecord) bool {
 	}
 }
 
-// ── Stats (in-memory mirror of the store) ────────────────
+// ── Stats mutations ───────────────────────────────────────
+//
+// All mutations go through recordCall / recordUsage, which operate directly on
+// the store under storeMu.  There is no separate in-memory Stats mirror.
 
-type Stats struct {
-	mu              sync.Mutex
-	TotalCalls      int
-	TotalTokens     int
-	CachedTokens    int
-	ReasoningTokens int
-	PremiumRequests float64
-	Models          map[string]int
-}
-
-func newStats() *Stats {
-	return &Stats{Models: make(map[string]int)}
-}
-
-// statsFromRecord initialises an in-memory Stats from a persisted TaskRecord.
-func statsFromRecord(tr *TaskRecord) *Stats {
-	s := &Stats{
-		TotalCalls:      tr.TotalCalls,
-		TotalTokens:     tr.TotalTokens,
-		CachedTokens:    tr.CachedTokens,
-		ReasoningTokens: tr.ReasoningTokens,
-		PremiumRequests: tr.PremiumRequests,
-		Models:          make(map[string]int, len(tr.Models)),
-	}
-	for k, v := range tr.Models {
-		s.Models[k] = v
-	}
-	return s
-}
-
-var (
-	globalStats  *Stats
-	taskStats    = map[string]*Stats{}
-	taskMu       sync.Mutex
-	monthlyStats *Stats
-)
-
-func getOrCreateTask(name string) *Stats {
-	taskMu.Lock()
-	defer taskMu.Unlock()
-	if s, ok := taskStats[name]; ok {
-		return s
-	}
-	// Bootstrap from the persistent store if a record already exists.
+// recordCall increments TotalCalls for the global, current-month, and per-task
+// records.  Called from the request path before the upstream round-trip.
+func recordCall(task string) {
+	now := timestamp()
 	storeMu.Lock()
-	tr := getOrCreateTaskRecord(name)
-	s := statsFromRecord(tr)
+	defer storeMu.Unlock()
+
+	store.Global.TotalCalls++
+	store.Global.LastSeen = now
+
+	mr := getOrCreateMonthlyRecord(currentMonthKey())
+	mr.TotalCalls++
+
+	tr := getOrCreateTaskRecord(task)
+	tr.TotalCalls++
+}
+
+// recordUsage updates token and premium-request counts in all three records.
+// Called after a successful SSE response has been parsed.
+func recordUsage(task, model string, total, cached, reasoning int) {
+	premiumWeight := premiumMultiplier(model)
+	now := timestamp()
+
+	storeMu.Lock()
+	addUsageLocked(store.Global, model, total, cached, reasoning, premiumWeight, now)
+	mr := getOrCreateMonthlyRecord(currentMonthKey())
+	addUsageLocked(mr, model, total, cached, reasoning, premiumWeight, now)
+	tr := getOrCreateTaskRecord(task)
+	addUsageLocked(tr, model, total, cached, reasoning, premiumWeight, now)
 	storeMu.Unlock()
-	taskStats[name] = s
-	return s
+}
+
+// addUsageLocked updates a single TaskRecord's usage fields.
+// Must be called with storeMu held.
+func addUsageLocked(tr *TaskRecord, model string, total, cached, reasoning int, premiumWeight float64, now string) {
+	tr.TotalTokens += total
+	tr.CachedTokens += cached
+	tr.ReasoningTokens += reasoning
+	tr.PremiumRequests += premiumWeight
+	tr.Models[model]++
+	tr.LastSeen = now
 }
 
 // ── Logging helpers ──────────────────────────────────────
@@ -340,54 +354,80 @@ func appendLog(path, text string) {
 	fmt.Fprintln(f, text)
 }
 
+// ── Summary generation ────────────────────────────────────
+
+// copyRecord returns a deep copy of a TaskRecord safe to use outside storeMu.
+func copyRecord(tr *TaskRecord) TaskRecord {
+	cp := *tr
+	cp.Models = make(map[string]int, len(tr.Models))
+	for k, v := range tr.Models {
+		cp.Models[k] = v
+	}
+	return cp
+}
+
+// writeRecordLines appends the standard stat lines for a TaskRecord to sb.
+func writeRecordLines(sb *strings.Builder, tr TaskRecord) {
+	sb.WriteString(fmt.Sprintf("  Total API calls     : %d\n", tr.TotalCalls))
+	sb.WriteString(fmt.Sprintf("  Total tokens        : %d\n", tr.TotalTokens))
+	sb.WriteString(fmt.Sprintf("  Cached tokens       : %d\n", tr.CachedTokens))
+	sb.WriteString(fmt.Sprintf("  Reasoning tokens    : %d\n", tr.ReasoningTokens))
+	sb.WriteString(fmt.Sprintf("  Premium requests    : %.2f (weighted total across all models)\n", tr.PremiumRequests))
+	sb.WriteString("  Models used:\n")
+	for _, model := range sortedKeys(tr.Models) {
+		sb.WriteString(fmt.Sprintf("    - %s: %d calls\n", model, tr.Models[model]))
+	}
+}
+
+func sortedKeys(m map[string]int) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 func saveSummary() {
-	// Flush in-memory stats back to the store so the JSON file is always current.
-	flushStatsToStore()
 	saveStore()
 
-	// Regenerate the human-readable summary from the store (single source of truth).
+	// Snapshot state under the lock; format outside to keep the critical section short.
 	storeMu.Lock()
-	g := store.Global
+	global := copyRecord(store.Global)
 	mk := currentMonthKey()
-	mr := store.Monthly[mk]
+	var monthly *TaskRecord
+	if mr, ok := store.Monthly[mk]; ok {
+		cp := copyRecord(mr)
+		monthly = &cp
+	}
+	taskNames := make([]string, 0, len(store.Tasks))
+	for n := range store.Tasks {
+		taskNames = append(taskNames, n)
+	}
+	sort.Strings(taskNames)
+	taskCopies := make(map[string]TaskRecord, len(store.Tasks))
+	for _, n := range taskNames {
+		taskCopies[n] = copyRecord(store.Tasks[n])
+	}
+	storeMu.Unlock()
+
 	var sb strings.Builder
 	sb.WriteString("\n" + strings.Repeat("=", 60) + "\n")
 	sb.WriteString(fmt.Sprintf("COPILOT USAGE SUMMARY  (updated %s)\n", timestamp()))
 	sb.WriteString(strings.Repeat("=", 60) + "\n")
-	if mr != nil {
+
+	if monthly != nil {
 		sb.WriteString(fmt.Sprintf("  MTD (%s):\n", mk))
-		sb.WriteString(fmt.Sprintf("  Total API calls     : %d\n", mr.TotalCalls))
-		sb.WriteString(fmt.Sprintf("  Total tokens        : %d\n", mr.TotalTokens))
-		sb.WriteString(fmt.Sprintf("  Cached tokens       : %d\n", mr.CachedTokens))
-		sb.WriteString(fmt.Sprintf("  Reasoning tokens    : %d\n", mr.ReasoningTokens))
-		sb.WriteString(fmt.Sprintf("  Premium requests    : %.2f (weighted total across all models)\n", mr.PremiumRequests))
-		sb.WriteString("  Models used:\n")
-		for model, count := range mr.Models {
-			sb.WriteString(fmt.Sprintf("    - %s: %d calls\n", model, count))
-		}
+		writeRecordLines(&sb, *monthly)
 		sb.WriteString("\n  All-time:\n")
 	}
-	sb.WriteString(fmt.Sprintf("  Total API calls     : %d\n", g.TotalCalls))
-	sb.WriteString(fmt.Sprintf("  Total tokens        : %d\n", g.TotalTokens))
-	sb.WriteString(fmt.Sprintf("  Cached tokens       : %d\n", g.CachedTokens))
-	sb.WriteString(fmt.Sprintf("  Reasoning tokens    : %d\n", g.ReasoningTokens))
-	sb.WriteString(fmt.Sprintf("  Premium requests    : %.2f (weighted total across all models)\n", g.PremiumRequests))
-	sb.WriteString("  Models used:\n")
-	for model, count := range g.Models {
-		sb.WriteString(fmt.Sprintf("    - %s: %d calls\n", model, count))
-	}
+	writeRecordLines(&sb, global)
 
-	names := make([]string, 0, len(store.Tasks))
-	for n := range store.Tasks {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-
-	if len(names) > 0 {
+	if len(taskNames) > 0 {
 		sb.WriteString("\n  Per-task breakdown:\n")
 		sb.WriteString("  " + strings.Repeat("-", 56) + "\n")
-		for _, name := range names {
-			tr := store.Tasks[name]
+		for _, name := range taskNames {
+			tr := taskCopies[name]
 			sb.WriteString(fmt.Sprintf("  Task: %s\n", name))
 			sb.WriteString(fmt.Sprintf("    First seen      : %s\n", tr.FirstSeen))
 			sb.WriteString(fmt.Sprintf("    Last seen       : %s\n", tr.LastSeen))
@@ -397,14 +437,12 @@ func saveSummary() {
 			sb.WriteString(fmt.Sprintf("    Reasoning tokens: %d\n", tr.ReasoningTokens))
 			sb.WriteString(fmt.Sprintf("    Premium requests: %.2f (weighted total)\n", tr.PremiumRequests))
 			sb.WriteString("    Models:\n")
-			for model, count := range tr.Models {
-				sb.WriteString(fmt.Sprintf("      - %s: %d calls\n", model, count))
+			for _, model := range sortedKeys(tr.Models) {
+				sb.WriteString(fmt.Sprintf("      - %s: %d calls\n", model, tr.Models[model]))
 			}
 			sb.WriteString("\n")
 		}
 	}
-	storeMu.Unlock()
-
 	sb.WriteString(strings.Repeat("=", 60) + "\n")
 	summary := sb.String()
 
@@ -415,72 +453,7 @@ func saveSummary() {
 	}
 	defer f.Close()
 	fmt.Fprint(f, summary)
-
 	log.Print(summary)
-}
-
-// flushStatsToStore copies in-memory Stats into the store's TaskRecords and
-// global record so they can be serialised to JSON.
-func flushStatsToStore() {
-	globalStats.mu.Lock()
-	g := store.Global
-	g.TotalCalls = globalStats.TotalCalls
-	g.TotalTokens = globalStats.TotalTokens
-	g.CachedTokens = globalStats.CachedTokens
-	g.ReasoningTokens = globalStats.ReasoningTokens
-	g.PremiumRequests = globalStats.PremiumRequests
-	g.LastSeen = timestamp()
-	for k, v := range globalStats.Models {
-		g.Models[k] = v
-	}
-	globalStats.mu.Unlock()
-
-	monthlyStats.mu.Lock()
-	mk := currentMonthKey()
-	if store.Monthly == nil {
-		store.Monthly = make(map[string]*TaskRecord)
-	}
-	// Keep only the current month and the previous month.
-	prevMonth := time.Now().AddDate(0, -1, 0).Format("2006-01")
-	for k := range store.Monthly {
-		if k != mk && k != prevMonth {
-			delete(store.Monthly, k)
-		}
-	}
-	mr, ok := store.Monthly[mk]
-	if !ok {
-		mr = newTaskRecord()
-		store.Monthly[mk] = mr
-	}
-	mr.TotalCalls = monthlyStats.TotalCalls
-	mr.TotalTokens = monthlyStats.TotalTokens
-	mr.CachedTokens = monthlyStats.CachedTokens
-	mr.ReasoningTokens = monthlyStats.ReasoningTokens
-	mr.PremiumRequests = monthlyStats.PremiumRequests
-	mr.LastSeen = timestamp()
-	for k, v := range monthlyStats.Models {
-		mr.Models[k] = v
-	}
-	monthlyStats.mu.Unlock()
-
-	taskMu.Lock()
-	defer taskMu.Unlock()
-	storeMu.Lock()
-	defer storeMu.Unlock()
-	for name, s := range taskStats {
-		s.mu.Lock()
-		tr := getOrCreateTaskRecord(name)
-		tr.TotalCalls = s.TotalCalls
-		tr.TotalTokens = s.TotalTokens
-		tr.CachedTokens = s.CachedTokens
-		tr.ReasoningTokens = s.ReasoningTokens
-		tr.PremiumRequests = s.PremiumRequests
-		tr.LastSeen = timestamp()
-		for k, v := range s.Models {
-			tr.Models[k] = v
-		}
-		s.mu.Unlock()
-	}
 }
 
 // ── SSE / usage parsing ──────────────────────────────────
@@ -497,8 +470,6 @@ type usageChunk struct {
 }
 
 func processResponseBody(task string, body []byte) {
-	ts := getOrCreateTask(task)
-
 	scanner := bufio.NewScanner(bytes.NewReader(body))
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -528,35 +499,10 @@ func processResponseBody(task string, body []byte) {
 		if model == "" {
 			model = "unknown"
 		}
+
+		recordUsage(task, model, total, cached, reasoning)
+
 		premiumWeight := premiumMultiplier(model)
-
-		// global
-		globalStats.mu.Lock()
-		globalStats.TotalTokens += total
-		globalStats.CachedTokens += cached
-		globalStats.ReasoningTokens += reasoning
-		globalStats.PremiumRequests += premiumWeight
-		globalStats.Models[model]++
-		globalStats.mu.Unlock()
-
-		// monthly
-		monthlyStats.mu.Lock()
-		monthlyStats.TotalTokens += total
-		monthlyStats.CachedTokens += cached
-		monthlyStats.ReasoningTokens += reasoning
-		monthlyStats.PremiumRequests += premiumWeight
-		monthlyStats.Models[model]++
-		monthlyStats.mu.Unlock()
-
-		// per-task
-		ts.mu.Lock()
-		ts.TotalTokens += total
-		ts.CachedTokens += cached
-		ts.ReasoningTokens += reasoning
-		ts.PremiumRequests += premiumWeight
-		ts.Models[model]++
-		ts.mu.Unlock()
-
 		callLog := fmt.Sprintf(
 			"[%s] [%s] ◄ RESPONSE\n  Model           : %s\n  Total tokens    : %d\n"+
 				"  Cached tokens   : %d\n  Reasoning tokens: %d\n  Premium weight  : %.2gx\n",
@@ -605,15 +551,30 @@ func loadOrCreateCA() (tls.Certificate, *x509.Certificate, error) {
 		return tls.Certificate{}, nil, err
 	}
 
-	cf, _ := os.Create(*caCertFile)
-	pem.Encode(cf, &pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	cf, err := os.Create(*caCertFile)
+	if err != nil {
+		return tls.Certificate{}, nil, fmt.Errorf("creating %s: %w", *caCertFile, err)
+	}
+	if err := pem.Encode(cf, &pem.Block{Type: "CERTIFICATE", Bytes: certDER}); err != nil {
+		cf.Close()
+		return tls.Certificate{}, nil, fmt.Errorf("writing %s: %w", *caCertFile, err)
+	}
 	cf.Close()
 
-	kf, _ := os.Create(*caKeyFile)
-	pem.Encode(kf, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	kf, err := os.Create(*caKeyFile)
+	if err != nil {
+		return tls.Certificate{}, nil, fmt.Errorf("creating %s: %w", *caKeyFile, err)
+	}
+	if err := pem.Encode(kf, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}); err != nil {
+		kf.Close()
+		return tls.Certificate{}, nil, fmt.Errorf("writing %s: %w", *caKeyFile, err)
+	}
 	kf.Close()
 
-	x509Cert, _ := x509.ParseCertificate(certDER)
+	x509Cert, err := x509.ParseCertificate(certDER)
+	if err != nil {
+		return tls.Certificate{}, nil, err
+	}
 	tlsCert := tls.Certificate{Certificate: [][]byte{certDER}, PrivateKey: key}
 	return tlsCert, x509Cert, nil
 }
@@ -623,7 +584,10 @@ func signCert(caCert *x509.Certificate, caKey *rsa.PrivateKey, host string) (*tl
 	if err != nil {
 		return nil, err
 	}
-	serial, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return nil, fmt.Errorf("generating serial number: %w", err)
+	}
 	tmpl := &x509.Certificate{
 		SerialNumber: serial,
 		Subject:      pkix.Name{CommonName: host},
@@ -703,7 +667,7 @@ func (p *proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	// Serve the decrypted connection with a fresh HTTP server.
 	innerProxy := &innerHandler{target: r.Host, parent: p}
 	srv := &http.Server{Handler: innerProxy}
-	srv.Serve(&singleConnListener{conn: tlsConn})
+	srv.Serve(newSingleConnListener(tlsConn))
 }
 
 // handlePlain — plain HTTP (non-CONNECT) requests.
@@ -716,19 +680,7 @@ func (p *proxy) doRequest(w http.ResponseWriter, r *http.Request, scheme, host s
 	isTarget := strings.Contains(host, targetHost)
 
 	if isTarget && r.Method == http.MethodPost {
-		globalStats.mu.Lock()
-		globalStats.TotalCalls++
-		globalStats.mu.Unlock()
-
-		monthlyStats.mu.Lock()
-		monthlyStats.TotalCalls++
-		monthlyStats.mu.Unlock()
-
-		ts := getOrCreateTask(task)
-		ts.mu.Lock()
-		ts.TotalCalls++
-		ts.mu.Unlock()
-
+		recordCall(task)
 		appendLog(*logFile, fmt.Sprintf("\n[%s] [%s] ► POST %s://%s%s",
 			timestamp(), task, scheme, host, r.URL.RequestURI()))
 	}
@@ -786,32 +738,36 @@ func (h *innerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // singleConnListener wraps a single net.Conn as a net.Listener.
+// The connection is sent exactly once; subsequent Accept calls block until
+// Close is called.
 type singleConnListener struct {
-	conn net.Conn
-	once sync.Once
-	ch   chan net.Conn
+	conn      net.Conn
+	ch        chan net.Conn
+	closeOnce sync.Once
+}
+
+func newSingleConnListener(conn net.Conn) *singleConnListener {
+	ch := make(chan net.Conn, 1)
+	ch <- conn
+	return &singleConnListener{conn: conn, ch: ch}
 }
 
 func (l *singleConnListener) Accept() (net.Conn, error) {
-	if l.ch == nil {
-		l.ch = make(chan net.Conn, 1)
-		l.ch <- l.conn
-	}
 	c, ok := <-l.ch
 	if !ok {
 		return nil, fmt.Errorf("listener closed")
 	}
 	return c, nil
 }
+
 func (l *singleConnListener) Close() error {
-	if l.ch != nil {
-		close(l.ch)
-	}
+	l.closeOnce.Do(func() { close(l.ch) })
 	return nil
 }
+
 func (l *singleConnListener) Addr() net.Addr { return l.conn.LocalAddr() }
 
-// ── main ─────────────────────────────────────────────────
+// ── CLI summary commands ──────────────────────────────────
 
 // printMonthRecord prints the stats for a single TaskRecord under a given heading.
 func printMonthRecord(label string, tr *TaskRecord) {
@@ -826,12 +782,7 @@ func printMonthRecord(label string, tr *TaskRecord) {
 	if len(tr.Models) > 0 {
 		fmt.Println()
 		fmt.Println("  Models:")
-		models := make([]string, 0, len(tr.Models))
-		for m := range tr.Models {
-			models = append(models, m)
-		}
-		sort.Strings(models)
-		for _, m := range models {
+		for _, m := range sortedKeys(tr.Models) {
 			mult := premiumMultiplier(m)
 			fmt.Printf("    %-36s %4d calls  (%.2gx)\n", m+":", tr.Models[m], mult)
 		}
@@ -874,12 +825,7 @@ func printSummary() {
 	if len(g.Models) > 0 {
 		fmt.Println()
 		fmt.Println("  Models (all-time):")
-		models := make([]string, 0, len(g.Models))
-		for m := range g.Models {
-			models = append(models, m)
-		}
-		sort.Strings(models)
-		for _, m := range models {
+		for _, m := range sortedKeys(g.Models) {
 			mult := premiumMultiplier(m)
 			fmt.Printf("    %-36s %4d calls  (%.2gx)\n", m+":", g.Models[m], mult)
 		}
@@ -935,6 +881,8 @@ func printPrevMonth() {
 	fmt.Println(thick)
 	fmt.Println()
 }
+
+// ── main ─────────────────────────────────────────────────
 
 func main() {
 	flag.Usage = func() {
@@ -992,24 +940,6 @@ func main() {
 		}
 	}
 
-	// Bootstrap in-memory stats from the (possibly reset) store so accumulated
-	// data from previous runs is available immediately.
-	storeMu.Lock()
-	globalStats = statsFromRecord(store.Global)
-	mk := currentMonthKey()
-	if mr, ok := store.Monthly[mk]; ok {
-		monthlyStats = statsFromRecord(mr)
-	} else {
-		monthlyStats = newStats()
-	}
-	// Also pre-populate any tasks already in the store.
-	for name, tr := range store.Tasks {
-		taskMu.Lock()
-		taskStats[name] = statsFromRecord(tr)
-		taskMu.Unlock()
-	}
-	storeMu.Unlock()
-
 	caTLS, caCert, err := loadOrCreateCA()
 	if err != nil {
 		log.Fatalf("CA init failed: %v", err)
@@ -1021,8 +951,11 @@ func main() {
 	log.Printf("Persistent data store: %s", *dataFile)
 
 	srv := &http.Server{
-		Addr:    *addr,
-		Handler: p,
+		Addr:         *addr,
+		Handler:      p,
+		ReadTimeout:  2 * time.Minute,
+		WriteTimeout: 2 * time.Minute,
+		IdleTimeout:  5 * time.Minute,
 	}
 	if err := srv.ListenAndServe(); err != nil {
 		log.Fatal(err)
