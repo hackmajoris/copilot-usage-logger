@@ -33,14 +33,26 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 )
 
-// version is set at build time via -ldflags "-X main.version=<tag>".
+// version is set at build time via -ldflags "-X main.version=<tag>" (goreleaser).
+// Falls back to the module version embedded by go install, then "dev".
 var version = "dev"
+
+func resolvedVersion() string {
+	if version != "dev" {
+		return version
+	}
+	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		return info.Main.Version
+	}
+	return version
+}
 
 // ── CONFIG flags ─────────────────────────────────────────
 
@@ -1052,7 +1064,7 @@ func main() {
 
 	// --version: print the build version and exit.
 	if *doVersion || flag.Arg(0) == "version" {
-		fmt.Println(version)
+		fmt.Println(resolvedVersion())
 		return
 	}
 
