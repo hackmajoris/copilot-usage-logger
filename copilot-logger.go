@@ -40,12 +40,12 @@ import (
 // ── CONFIG flags ─────────────────────────────────────────
 
 var (
-	addr        = flag.String("addr", ":8080", "proxy listen address")
-	taskName    = flag.String("task", "default", "task name to group usage under")
-	logFile     = flag.String("log", "copilot_usage.log", "append-only request/response log")
-	summaryFile = flag.String("summary", "copilot_summary.log", "overwritten summary file")
-	caCertFile  = flag.String("cacert", "ca.crt", "CA certificate file (created if missing)")
-	caKeyFile   = flag.String("cakey", "ca.key", "CA private-key file (created if missing)")
+	addr        = flag.String("addr", ":8080", "TCP address the MITM proxy listens on (e.g. :8080 or 127.0.0.1:9090)")
+	taskName    = flag.String("task", "default", "label used to group token-usage stats in the summary log (e.g. feature-branch or sprint-42)")
+	logFile     = flag.String("log", "copilot_usage.log", "path to the append-only NDJSON file that records every intercepted request and response")
+	summaryFile = flag.String("summary", "copilot_summary.log", "path to the summary file that is rewritten on each request with aggregated per-model token counts")
+	caCertFile  = flag.String("cacert", "ca.crt", "path to the self-signed CA certificate used to intercept TLS traffic (created automatically on first run)")
+	caKeyFile   = flag.String("cakey", "ca.key", "path to the CA private key that signs per-host certificates (created automatically on first run, keep secret)")
 )
 
 const targetHost = "api.githubcopilot.com"
@@ -486,6 +486,24 @@ func (l *singleConnListener) Addr() net.Addr { return l.conn.LocalAddr() }
 // ── main ─────────────────────────────────────────────────
 
 func main() {
+	flag.Usage = func() {
+		fmt.Fprintf(flag.CommandLine.Output(), `copilot-logger — HTTPS MITM proxy that intercepts api.githubcopilot.com
+traffic and logs token usage per task.
+
+Usage:
+  copilot-logger [flags]
+
+Workflow:
+  1. Run the proxy (it creates ca.crt/ca.key on first run).
+  2. Install ca.crt as a trusted root CA in your OS/browser/editor.
+  3. Point HTTP_PROXY / HTTPS_PROXY (or your editor's proxy settings) to
+     http://localhost:8080.
+  4. Use GitHub Copilot normally — every request is logged and summarised.
+
+Flags:
+`)
+		flag.PrintDefaults()
+	}
 	flag.Parse()
 
 	caTLS, caCert, err := loadOrCreateCA()

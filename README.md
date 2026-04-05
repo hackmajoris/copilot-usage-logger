@@ -18,16 +18,52 @@ No mitmproxy or Python required. Written in Go using only the standard library.
 
 ---
 
-## Requirements
+## Installation
 
-- Go 1.21 or later
-- The generated `ca.crt` trusted as a root CA on your machine (one-time setup)
-
----
-
-## Build
+### Option 1: `go install` (requires Go)
 
 ```bash
+go install github.com/hackmajoris/copilot-usage-logger@latest
+```
+
+The binary will be placed in `$(go env GOPATH)/bin/copilot-logger`. Make sure that directory is in your `PATH`.
+
+### Option 2: Download a pre-built binary
+
+Go to the [Releases page](https://github.com/hackmajoris/copilot-usage-logger/releases/latest) and download the archive for your OS and architecture:
+
+| OS      | Architecture | File |
+|---------|-------------|------|
+| macOS   | Apple Silicon (M1/M2/M3) | `copilot-usage-logger_darwin_arm64.tar.gz` |
+| macOS   | Intel | `copilot-usage-logger_darwin_amd64.tar.gz` |
+| Linux   | x86-64 | `copilot-usage-logger_linux_amd64.tar.gz` |
+| Linux   | ARM64 | `copilot-usage-logger_linux_arm64.tar.gz` |
+| Windows | x86-64 | `copilot-usage-logger_windows_amd64.zip` |
+| Windows | ARM64 | `copilot-usage-logger_windows_arm64.zip` |
+
+Extract and run:
+
+```bash
+# macOS / Linux
+tar -xzf copilot-usage-logger_darwin_arm64.tar.gz
+./copilot-logger
+
+# Windows (PowerShell)
+Expand-Archive copilot-usage-logger_windows_amd64.zip
+.\copilot-logger.exe
+```
+
+Verify the download with `checksums.txt` (included in the release):
+
+```bash
+sha256sum --check checksums.txt
+```
+
+### Option 3: Build from source (requires Go)
+
+```bash
+git clone https://github.com/hackmajoris/copilot-usage-logger.git
+cd copilot-usage-logger
 go build -o copilot-logger copilot-logger.go
 ```
 
@@ -36,6 +72,13 @@ Or run directly without building:
 ```bash
 go run copilot-logger.go
 ```
+
+---
+
+## Requirements
+
+- Go 1.21 or later (only for `go install` or building from source)
+- The generated `ca.crt` trusted as a root CA on your machine (one-time setup)
 
 ---
 
@@ -96,13 +139,22 @@ Import-Certificate -FilePath ca.crt -CertStoreLocation Cert:\LocalMachine\Root
 
 ```bash
 ./copilot-logger \
-  -addr    :8080               \  # proxy listen address
-  -task    my-feature          \  # task label for grouping
-  -log     copilot_usage.log   \  # append-only request/response log
-  -summary copilot_summary.log \  # overwritten on every response
-  -cacert  ca.crt              \  # CA certificate (created if missing)
-  -cakey   ca.key                 # CA private key  (created if missing)
+  -addr    :8080               \
+  -task    my-feature          \
+  -log     copilot_usage.log   \
+  -summary copilot_summary.log \
+  -cacert  ca.crt              \
+  -cakey   ca.key
 ```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-addr` | `:8080` | TCP address the MITM proxy listens on (e.g. `:8080` or `127.0.0.1:9090`) |
+| `-task` | `default` | Label used to group token-usage stats in the summary log (e.g. `feature-branch` or `sprint-42`) |
+| `-log` | `copilot_usage.log` | Path to the append-only NDJSON file that records every intercepted request and response |
+| `-summary` | `copilot_summary.log` | Path to the summary file that is rewritten on each request with aggregated per-model token counts |
+| `-cacert` | `ca.crt` | Path to the self-signed CA certificate used to intercept TLS traffic (created automatically on first run) |
+| `-cakey` | `ca.key` | Path to the CA private key that signs per-host certificates (created automatically on first run — keep secret) |
 
 ---
 
@@ -258,3 +310,4 @@ Add `ca.key` to your `.gitignore`:
 ```bash
 echo "ca.key" >> .gitignore
 ```
+<!---->
