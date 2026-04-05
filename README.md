@@ -1,4 +1,4 @@
-# copilot-logger
+# copilot-usage-logger
 
 A standalone HTTPS MITM proxy that intercepts traffic to `api.githubcopilot.com`
 and logs token usage, model calls, and premium request weights — per task and globally.
