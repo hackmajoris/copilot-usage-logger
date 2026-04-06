@@ -235,6 +235,7 @@ fi
 
 ```powershell
 # copilot-usage-logger proxy
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned -Force
 if (Test-NetConnection localhost -Port 8080 -InformationLevel Quiet -WarningAction SilentlyContinue) {
     $env:HTTP_PROXY  = "http://localhost:8080"
     $env:HTTPS_PROXY = "http://localhost:8080"

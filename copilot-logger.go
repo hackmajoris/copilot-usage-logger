@@ -1077,6 +1077,7 @@ func setupShell() {
 
 		snippet := fmt.Sprintf(`
 %s
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned -Force
 if (Test-NetConnection localhost -Port %s -InformationLevel Quiet -WarningAction SilentlyContinue) {
     $env:HTTP_PROXY  = "%s"
     $env:HTTPS_PROXY = "%s"
