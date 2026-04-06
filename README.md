@@ -215,7 +215,12 @@ Run `--setup-shell` once to have the snippet added to your profile automatically
 copilot-usage-logger --setup-shell
 ```
 
-This appends a conditional block to `~/.zshrc` (zsh), `~/.bashrc` (bash), or the PowerShell `$PROFILE`. The proxy variables are set automatically when the proxy is running and silently skipped when it is not — so tools work normally either way.
+This appends a conditional block to `~/.zshrc` (zsh), `~/.bashrc` (bash), or on Windows to **both** PowerShell profile paths:
+
+- `Documents\PowerShell\Microsoft.PowerShell_profile.ps1` (PowerShell 7+)
+- `Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1` (Windows PowerShell 5)
+
+Writing to both ensures the snippet is loaded regardless of which version you open. The proxy variables are set automatically when the proxy is running and silently skipped when it is not — so tools work normally either way.
 
 The snippet it adds looks like this:
 
