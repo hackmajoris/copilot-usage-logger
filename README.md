@@ -5,6 +5,56 @@ and logs token usage, model calls, and premium request weights — per task and 
 
 No mitmproxy or Python required. Written in Go using only the standard library.
 
+Run `copilot-logger --summary` from any terminal at any time to see accumulated usage:
+
+```
+════════════════════════════════════════════════════════════
+  COPILOT USAGE SUMMARY  —  current month: 2026-04
+════════════════════════════════════════════════════════════
+  Current month (2026-04)
+────────────────────────────────────────────────────────────
+  Total API calls:           4
+  Total tokens:              41455
+  Cached tokens:             20167
+  Reasoning tokens:          0
+  Premium requests (weighted): 2.00
+
+  Models:
+    claude-sonnet-4.6:                      2 calls  (1x)
+    gpt-5-mini:                             2 calls  (0x)
+
+  All-time
+────────────────────────────────────────────────────────────
+  Total API calls:           4
+  Total tokens:              41455
+  Cached tokens:             20167
+  Reasoning tokens:          0
+  Premium requests (weighted): 2.00
+
+  Models (all-time):
+    claude-sonnet-4.6:                      2 calls  (1x)
+    gpt-5-mini:                             2 calls  (0x)
+
+────────────────────────────────────────────────────────────
+  TASKS
+────────────────────────────────────────────────────────────
+  check-idfdf
+────────────────────────────────────────────────────────────
+  Total API calls:           4
+  Total tokens:              41455
+  Cached tokens:             20167
+  Reasoning tokens:          0
+  Premium requests (weighted): 2.00
+
+  Models:
+    claude-sonnet-4.6:                      2 calls  (1x)
+    gpt-5-mini:                             2 calls  (0x)
+════════════════════════════════════════════════════════════
+```
+
+Stats persist across runs in a JSON store in the [config directory](#config-directory).
+Use `-task <name>` when starting the proxy to group calls by feature or session.
+
 ---
 
 ## How it works

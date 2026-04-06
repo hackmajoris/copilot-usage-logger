@@ -928,11 +928,10 @@ func printSummary() {
 		fmt.Println()
 		fmt.Println(sep)
 		fmt.Println("  TASKS")
-		fmt.Println(sep)
 		for _, name := range names {
 			tr := store.Tasks[name]
-			fmt.Printf("  %-20s  calls=%-6d tokens=%-10d cached=%-8d reasoning=%-8d premium=%.2f\n",
-				name, tr.TotalCalls, tr.TotalTokens, tr.CachedTokens, tr.ReasoningTokens, tr.PremiumRequests)
+			fmt.Println(sep)
+			printMonthRecord(name, tr)
 		}
 	}
 
