@@ -8,7 +8,7 @@ before:
 
 builds:
   - main: ./copilot-logger.go
-    binary: copilot-logger
+    binary: copilot-usage-logger
     env:
       - CGO_ENABLED=0
     goos:

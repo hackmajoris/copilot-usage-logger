@@ -1,4 +1,4 @@
-// copilot-logger — standalone HTTPS MITM proxy that intercepts
+// copilot-usage-logger — standalone HTTPS MITM proxy that intercepts
 // api.githubcopilot.com traffic and logs token usage.
 //
 // Usage:
@@ -58,24 +58,24 @@ func resolvedVersion() string {
 // ── Config directory ──────────────────────────────────────
 
 // defaultConfigDir returns the platform-appropriate default directory for
-// copilot-logger's persistent files:
+// copilot-usage-logger's persistent files:
 //
-//   - Linux / macOS: $XDG_CONFIG_HOME/copilot-logger  (falls back to ~/.config/copilot-logger)
-//   - Windows:       %APPDATA%\copilot-logger
+//   - Linux / macOS: $XDG_CONFIG_HOME/copilot-usage-logger  (falls back to ~/.config/copilot-usage-logger)
+//   - Windows:       %APPDATA%\copilot-usage-logger
 //
 // The caller is responsible for creating the directory if it doesn't exist.
 func defaultConfigDir() string {
 	switch runtime.GOOS {
 	case "windows":
 		if appdata := os.Getenv("APPDATA"); appdata != "" {
-			return filepath.Join(appdata, "copilot-logger")
+			return filepath.Join(appdata, "copilot-usage-logger")
 		}
 	default:
 		if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-			return filepath.Join(xdg, "copilot-logger")
+			return filepath.Join(xdg, "copilot-usage-logger")
 		}
 		if home, err := os.UserHomeDir(); err == nil {
-			return filepath.Join(home, ".config", "copilot-logger")
+			return filepath.Join(home, ".config", "copilot-usage-logger")
 		}
 	}
 	// Fallback: current working directory (original behaviour).
@@ -107,6 +107,7 @@ var (
 	doVersion    *bool
 	doTrustCert  *bool
 	doPrintProxy *bool
+	doSetupShell *bool
 )
 
 func init() {
@@ -123,7 +124,8 @@ func init() {
 	doPrevMonth = flag.Bool("prevmonth", false, "print previous-month usage summary from persistent data store and exit")
 	doVersion = flag.Bool("version", false, "print the application version and exit")
 	doTrustCert = flag.Bool("trust-cert", false, "generate CA cert (if needed) and install it as a trusted root CA in the OS keychain")
-	doPrintProxy = flag.Bool("print-proxy", false, "print shell export commands to configure HTTP_PROXY/HTTPS_PROXY and exit")
+	doPrintProxy  = flag.Bool("print-proxy", false, "print shell export commands to configure HTTP_PROXY/HTTPS_PROXY and exit")
+	doSetupShell  = flag.Bool("setup-shell", false, "append a conditional proxy snippet to your shell profile (~/.zshrc, ~/.bashrc, or PowerShell $PROFILE) and exit")
 }
 
 const targetHost = "githubcopilot.com"
@@ -614,7 +616,7 @@ func loadOrCreateCA() (tls.Certificate, *x509.Certificate, error) {
 
 	tmpl := &x509.Certificate{
 		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: "copilot-logger CA"},
+		Subject:               pkix.Name{CommonName: "copilot-usage-logger CA"},
 		NotBefore:             time.Now().Add(-time.Hour),
 		NotAfter:              time.Now().Add(10 * 365 * 24 * time.Hour),
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
@@ -997,7 +999,7 @@ func trustCert() {
 	switch runtime.GOOS {
 	case "darwin":
 		const keychain = "/Library/Keychains/System.keychain"
-		const certName = "copilot-logger CA"
+		const certName = "copilot-usage-logger CA"
 
 		// Remove any existing cert with the same CN so the new one takes effect.
 		// `security delete-certificate` exits non-zero when nothing is found — ignore that.
@@ -1020,7 +1022,7 @@ func trustCert() {
 		fmt.Println("Certificate trusted successfully.")
 
 	case "linux":
-		dest := "/usr/local/share/ca-certificates/copilot-logger-ca.crt"
+		dest := "/usr/local/share/ca-certificates/copilot-usage-logger-ca.crt"
 		fmt.Printf("Copying %s → %s (sudo required)…\n", certPath, dest)
 		cp := exec.Command("sudo", "cp", certPath, dest)
 		cp.Stdin = os.Stdin
@@ -1056,18 +1058,100 @@ func trustCert() {
 	}
 }
 
+// setupShell appends a conditional proxy snippet to the user's shell profile.
+// It is idempotent: if the marker comment is already present the file is not modified.
+func setupShell() {
+	proxyURL := "http://localhost" + *addr
+
+	if runtime.GOOS == "windows" {
+		// PowerShell profile
+		profileDir := filepath.Join(os.Getenv("USERPROFILE"), "Documents", "PowerShell")
+		profilePath := filepath.Join(profileDir, "Microsoft.PowerShell_profile.ps1")
+
+		const marker = "# copilot-usage-logger proxy"
+		existing, _ := os.ReadFile(profilePath)
+		if strings.Contains(string(existing), marker) {
+			fmt.Printf("Proxy snippet already present in %s\n", profilePath)
+			return
+		}
+
+		snippet := fmt.Sprintf(`
+%s
+if (Test-NetConnection localhost -Port %s -InformationLevel Quiet -WarningAction SilentlyContinue) {
+    $env:HTTP_PROXY  = "%s"
+    $env:HTTPS_PROXY = "%s"
+    $env:http_proxy  = "%s"
+    $env:https_proxy = "%s"
+}
+`, marker, strings.TrimPrefix(*addr, ":"), proxyURL, proxyURL, proxyURL, proxyURL)
+
+		if err := os.MkdirAll(profileDir, 0o755); err != nil {
+			log.Fatalf("Failed to create PowerShell profile directory: %v", err)
+		}
+		f, err := os.OpenFile(profilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		if err != nil {
+			log.Fatalf("Failed to open %s: %v", profilePath, err)
+		}
+		defer f.Close()
+		if _, err := f.WriteString(snippet); err != nil {
+			log.Fatalf("Failed to write to %s: %v", profilePath, err)
+		}
+		fmt.Printf("Proxy snippet added to %s\n", profilePath)
+		fmt.Println("Restart PowerShell (or run `. $PROFILE`) to apply.")
+		return
+	}
+
+	// Unix/macOS: detect shell from $SHELL, fall back to bash
+	shell := os.Getenv("SHELL")
+	var profilePath string
+	switch {
+	case strings.HasSuffix(shell, "zsh"):
+		profilePath = filepath.Join(os.Getenv("HOME"), ".zshrc")
+	default:
+		profilePath = filepath.Join(os.Getenv("HOME"), ".bashrc")
+	}
+
+	const marker = "# copilot-usage-logger proxy"
+	existing, _ := os.ReadFile(profilePath)
+	if strings.Contains(string(existing), marker) {
+		fmt.Printf("Proxy snippet already present in %s\n", profilePath)
+		return
+	}
+
+	port := strings.TrimPrefix(*addr, ":")
+	snippet := fmt.Sprintf(`
+%s
+if nc -z -w1 localhost %s 2>/dev/null; then
+  export HTTP_PROXY=%s
+  export HTTPS_PROXY=%s
+  export http_proxy=%s
+  export https_proxy=%s
+fi
+`, marker, port, proxyURL, proxyURL, proxyURL, proxyURL)
+
+	f, err := os.OpenFile(profilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		log.Fatalf("Failed to open %s: %v", profilePath, err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(snippet); err != nil {
+		log.Fatalf("Failed to write to %s: %v", profilePath, err)
+	}
+	fmt.Printf("Proxy snippet added to %s\n", profilePath)
+	fmt.Printf("Restart your shell (or run `source %s`) to apply.\n", profilePath)
+}
+
 // printProxy prints shell commands to configure HTTP(S)_PROXY and exit.
 //
-// Unix/macOS:  eval "$(copilot-logger --print-proxy)"
-// Windows CMD: for /f "tokens=*" %i in ('copilot-logger --print-proxy') do %i
-// PowerShell:  copilot-logger --print-proxy | Invoke-Expression
+// Unix/macOS:  eval "$(copilot-usage-logger --print-proxy)"
+// PowerShell:  copilot-usage-logger --print-proxy | Invoke-Expression
 func printProxy() {
 	proxyURL := "http://localhost" + *addr
 	if runtime.GOOS == "windows" {
-		fmt.Printf("set HTTP_PROXY=%s\n", proxyURL)
-		fmt.Printf("set HTTPS_PROXY=%s\n", proxyURL)
-		fmt.Printf("set http_proxy=%s\n", proxyURL)
-		fmt.Printf("set https_proxy=%s\n", proxyURL)
+		fmt.Printf("$env:HTTP_PROXY  = \"%s\"\n", proxyURL)
+		fmt.Printf("$env:HTTPS_PROXY = \"%s\"\n", proxyURL)
+		fmt.Printf("$env:http_proxy  = \"%s\"\n", proxyURL)
+		fmt.Printf("$env:https_proxy = \"%s\"\n", proxyURL)
 	} else {
 		fmt.Printf("export HTTP_PROXY=%s\n", proxyURL)
 		fmt.Printf("export HTTPS_PROXY=%s\n", proxyURL)
@@ -1081,7 +1165,7 @@ func printProxy() {
 func main() {
 	flag.Usage = func() {
 		out := flag.CommandLine.Output()
-		fmt.Fprintf(out, "usage: copilot-logger [-addr ADDR] [-task TASK] [-log FILE] [-data FILE]\n")
+		fmt.Fprintf(out, "usage: copilot-usage-logger [-addr ADDR] [-task TASK] [-log FILE] [-data FILE]\n")
 		fmt.Fprintf(out, "                      [-cacert FILE] [-cakey FILE] [-h] [--summary] [--prevmonth] [--version]\n")
 		fmt.Fprintf(out, "\n")
 		fmt.Fprintf(out, "HTTPS MITM proxy that intercepts api.githubcopilot.com traffic and logs token usage.\n")
@@ -1108,15 +1192,17 @@ func main() {
 		fmt.Fprintf(out, "                  macOS: sudo security add-trusted-cert (password prompt)\n")
 		fmt.Fprintf(out, "                  Linux: sudo update-ca-certificates\n")
 		fmt.Fprintf(out, "                  Windows: certutil -addstore (run as Administrator)\n")
-		fmt.Fprintf(out, "  --print-proxy   print shell export/set commands for HTTP_PROXY/HTTPS_PROXY and exit\n")
-		fmt.Fprintf(out, "                  Unix/macOS:  eval \"$(copilot-logger --print-proxy)\"\n")
-		fmt.Fprintf(out, "                  PowerShell:  copilot-logger --print-proxy | Invoke-Expression\n")
-		fmt.Fprintf(out, "                  CMD:         for /f \"tokens=*\" %%i in ('copilot-logger --print-proxy') do %%i\n")
+		fmt.Fprintf(out, "  --print-proxy   print shell export commands for HTTP_PROXY/HTTPS_PROXY and exit\n")
+		fmt.Fprintf(out, "                  Unix/macOS:  eval \"$(copilot-usage-logger --print-proxy)\"\n")
+		fmt.Fprintf(out, "                  PowerShell:  copilot-usage-logger --print-proxy | Invoke-Expression\n")
+		fmt.Fprintf(out, "  --setup-shell   append a conditional proxy snippet to your shell profile and exit\n")
+		fmt.Fprintf(out, "                  sets proxy vars automatically when the proxy is running, skips when not\n")
+		fmt.Fprintf(out, "                  detects zsh / bash on Unix, writes to PowerShell %%PROFILE%% on Windows\n")
 		fmt.Fprintf(out, "\n")
 		fmt.Fprintf(out, "workflow:\n")
-		fmt.Fprintf(out, "  1. copilot-logger --trust-cert            (first time: generates cert and trusts it)\n")
-		fmt.Fprintf(out, "  2. copilot-logger                         (start the proxy in a dedicated terminal)\n")
-		fmt.Fprintf(out, "  3. eval \"$(copilot-logger --print-proxy)\" (set proxy vars in your working terminal)\n")
+		fmt.Fprintf(out, "  1. copilot-usage-logger --trust-cert            (first time: generates cert and trusts it)\n")
+		fmt.Fprintf(out, "  2. copilot-usage-logger                         (start the proxy in a dedicated terminal)\n")
+		fmt.Fprintf(out, "  3. eval \"$(copilot-usage-logger --print-proxy)\" (set proxy vars in your working terminal)\n")
 	}
 	flag.Parse()
 
@@ -1142,6 +1228,12 @@ func main() {
 	// --print-proxy: emit shell export lines for HTTP(S)_PROXY and exit.
 	if *doPrintProxy || flag.Arg(0) == "print-proxy" {
 		printProxy()
+		return
+	}
+
+	// --setup-shell: append conditional proxy snippet to shell profile and exit.
+	if *doSetupShell || flag.Arg(0) == "setup-shell" {
+		setupShell()
 		return
 	}
 
@@ -1177,7 +1269,7 @@ func main() {
 	}
 
 	p := newProxy(caTLS, caCert)
-	log.Printf("copilot-logger proxy listening on %s  (task=%s)", *addr, *taskName)
+	log.Printf("copilot-usage-logger proxy listening on %s  (task=%s)", *addr, *taskName)
 	log.Printf("Install %s as a trusted root CA, then point your proxy settings to http://localhost%s", *caCertFile, *addr)
 	log.Printf("Persistent data store: %s", *dataFile)
 

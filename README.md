@@ -5,7 +5,7 @@ and logs token usage, model calls, and premium request weights — per task and 
 
 No mitmproxy or Python required. Written in Go using only the standard library.
 
-Run `copilot-logger --summary` from any terminal at any time to see accumulated usage:
+Run `copilot-usage-logger --summary` from any terminal at any time to see accumulated usage:
 
 ```
 ════════════════════════════════════════════════════════════
@@ -80,7 +80,7 @@ Follow these steps in order. Each step must be completed before the next.
 go install github.com/hackmajoris/copilot-usage-logger@latest
 ```
 
-The binary lands in `$(go env GOPATH)/bin/copilot-logger`. Make sure that directory
+The binary lands in `$(go env GOPATH)/bin/copilot-usage-logger`. Make sure that directory
 is on your `PATH`:
 
 ```bash
@@ -105,10 +105,10 @@ Extract into your working directory:
 
 ```bash
 # macOS / Linux
-tar -xzf copilot-usage-logger_darwin_arm64.tar.gz -C ~/copilot-logger
+tar -xzf copilot-usage-logger_darwin_arm64.tar.gz -C ~/copilot-usage-logger
 
 # Windows (PowerShell)
-Expand-Archive copilot-usage-logger_windows_amd64.zip -DestinationPath $HOME\copilot-logger
+Expand-Archive copilot-usage-logger_windows_amd64.zip -DestinationPath $HOME\copilot-usage-logger
 ```
 
 Verify the download with `checksums.txt` (included in the release):
@@ -122,7 +122,7 @@ sha256sum --check checksums.txt
 ```bash
 git clone https://github.com/hackmajoris/copilot-usage-logger.git
 cd copilot-usage-logger
-go build -o copilot-logger copilot-logger.go
+go build -o copilot-usage-logger copilot-logger.go
 ```
 
 ---
@@ -134,7 +134,7 @@ Run the `--trust-cert` command. It generates `ca.crt` / `ca.key` in the
 as a trusted root CA in your OS keychain.
 
 ```bash
-copilot-logger --trust-cert
+copilot-usage-logger --trust-cert
 ```
 
 You will be prompted for your password (macOS / Linux) or need to run as Administrator
@@ -160,13 +160,13 @@ Open a dedicated terminal window (or a tmux/screen session) and start the proxy.
 Leave this terminal running for as long as you want to capture usage.
 
 ```bash
-copilot-logger
+copilot-usage-logger
 ```
 
 To label the session so you can group stats later:
 
 ```bash
-copilot-logger -task my-feature
+copilot-usage-logger -task my-feature
 ```
 
 The proxy is now listening on `http://127.0.0.1:8080`.
@@ -180,28 +180,70 @@ agents) and run:
 
 **macOS / Linux**
 ```bash
-eval "$(copilot-logger --print-proxy)"
+eval "$(copilot-usage-logger --print-proxy)"
 ```
 
 **PowerShell**
 ```powershell
-copilot-logger --print-proxy | Invoke-Expression
+copilot-usage-logger --print-proxy | Invoke-Expression
 ```
 
-**CMD**
-```cmd
-for /f "tokens=*" %i in ('copilot-logger --print-proxy') do %i
+This outputs and applies `$env:` assignments:
+
+```powershell
+$env:HTTP_PROXY  = "http://localhost:8080"
+$env:HTTPS_PROXY = "http://localhost:8080"
+$env:http_proxy  = "http://localhost:8080"
+$env:https_proxy = "http://localhost:8080"
 ```
 
 This sets `HTTP_PROXY`, `HTTPS_PROXY`, `http_proxy`, and `https_proxy` in the
 current session. If you started the proxy on a custom port pass the same flag:
 
 ```bash
-eval "$(copilot-logger -addr :9090 --print-proxy)"
+eval "$(copilot-usage-logger -addr :9090 --print-proxy)"
 ```
 
 > The variables only apply to the current shell session — re-run the command each
 > time you open a new terminal.
+
+#### Persistent proxy (set once, works across sessions)
+
+Run `--setup-shell` once to have the snippet added to your profile automatically:
+
+```bash
+copilot-usage-logger --setup-shell
+```
+
+This appends a conditional block to `~/.zshrc` (zsh), `~/.bashrc` (bash), or the PowerShell `$PROFILE`. The proxy variables are set automatically when the proxy is running and silently skipped when it is not — so tools work normally either way.
+
+The snippet it adds looks like this:
+
+**macOS / Linux**
+
+```bash
+# copilot-usage-logger proxy
+if nc -z -w1 localhost 8080 2>/dev/null; then
+  export HTTP_PROXY=http://localhost:8080
+  export HTTPS_PROXY=http://localhost:8080
+  export http_proxy=http://localhost:8080
+  export https_proxy=http://localhost:8080
+fi
+```
+
+**PowerShell**
+
+```powershell
+# copilot-usage-logger proxy
+if (Test-NetConnection localhost -Port 8080 -InformationLevel Quiet -WarningAction SilentlyContinue) {
+    $env:HTTP_PROXY  = "http://localhost:8080"
+    $env:HTTPS_PROXY = "http://localhost:8080"
+    $env:http_proxy  = "http://localhost:8080"
+    $env:https_proxy = "http://localhost:8080"
+}
+```
+
+The command is idempotent — running it again will not add the snippet a second time. Restart your shell (or `source ~/.zshrc` / `. $PROFILE`) after running it.
 
 ---
 
@@ -248,7 +290,7 @@ will be captured automatically once those are set.
 ---
 
 You should now see log lines appearing in the proxy terminal as Copilot requests are
-intercepted. Check the summary log or run `copilot-logger --summary` from any directory
+intercepted. Check the summary log or run `copilot-usage-logger --summary` from any directory
 to view aggregated stats.
 
 ---
@@ -256,12 +298,12 @@ to view aggregated stats.
 ## Config directory
 
 All persistent files are stored in a single platform-specific directory — no need to
-`cd` anywhere before running `copilot-logger --summary` or any other command.
+`cd` anywhere before running `copilot-usage-logger --summary` or any other command.
 
 | Platform       | Default location                                      |
 |----------------|-------------------------------------------------------|
-| Linux / macOS  | `$XDG_CONFIG_HOME/copilot-logger` (falls back to `~/.config/copilot-logger`) |
-| Windows        | `%APPDATA%\copilot-logger`                            |
+| Linux / macOS  | `$XDG_CONFIG_HOME/copilot-usage-logger` (falls back to `~/.config/copilot-usage-logger`) |
+| Windows        | `%APPDATA%\copilot-usage-logger`                            |
 
 Override the base directory by setting `$XDG_CONFIG_HOME` (Linux/macOS) or `%APPDATA%`
 (Windows), or override individual file paths with the corresponding flags (see
@@ -275,30 +317,31 @@ Override the base directory by setting `$XDG_CONFIG_HOME` (Linux/macOS) or `%APP
 
 | Command                          | Description                                                        |
 |----------------------------------|--------------------------------------------------------------------|
-| `copilot-logger`                 | Start the MITM proxy (default mode)                                |
-| `copilot-logger --trust-cert`    | Generate CA cert (if needed) and install it as a trusted root CA            |
-| `copilot-logger --print-proxy`   | Print shell commands to set `HTTP_PROXY`/`HTTPS_PROXY` (use with `eval`)    |
-| `copilot-logger --summary`       | Print current-month usage summary and exit                         |
-| `copilot-logger --prevmonth`     | Print previous-month usage summary and exit                        |
-| `copilot-logger --version`       | Print the application version and exit                             |
-| `copilot-logger --help`          | Print help and exit                                                |
+| `copilot-usage-logger`                 | Start the MITM proxy (default mode)                                |
+| `copilot-usage-logger --trust-cert`    | Generate CA cert (if needed) and install it as a trusted root CA            |
+| `copilot-usage-logger --print-proxy`   | Print shell commands to set `HTTP_PROXY`/`HTTPS_PROXY` (use with `eval`)    |
+| `copilot-usage-logger --setup-shell`   | Append a conditional proxy snippet to your shell profile (one-time setup)   |
+| `copilot-usage-logger --summary`       | Print current-month usage summary and exit                         |
+| `copilot-usage-logger --prevmonth`     | Print previous-month usage summary and exit                        |
+| `copilot-usage-logger --version`       | Print the application version and exit                             |
+| `copilot-usage-logger --help`          | Print help and exit                                                |
 
 Positional subcommands are also accepted for `summary`, `prevmonth`, and `version`
-(e.g. `copilot-logger summary`).
+(e.g. `copilot-usage-logger summary`).
 
 ---
 
 ## All flags
 
 ```bash
-copilot-logger \
+copilot-usage-logger \
   -addr         :8080                                    \
   -task         my-feature                               \
-  -log          ~/.config/copilot-logger/copilot_usage.log   \
-  -summary-file ~/.config/copilot-logger/copilot_summary.log \
-  -data         ~/.config/copilot-logger/copilot_data.json   \
-  -cacert       ~/.config/copilot-logger/ca.crt              \
-  -cakey        ~/.config/copilot-logger/ca.key
+  -log          ~/.config/copilot-usage-logger/copilot_usage.log   \
+  -summary-file ~/.config/copilot-usage-logger/copilot_summary.log \
+  -data         ~/.config/copilot-usage-logger/copilot_data.json   \
+  -cacert       ~/.config/copilot-usage-logger/ca.crt              \
+  -cakey        ~/.config/copilot-usage-logger/ca.key
 ```
 
 | Flag            | Default                             | Description                                                                   |
@@ -312,6 +355,7 @@ copilot-logger \
 | `-cakey`        | `<config dir>/ca.key`               | Path to the CA private key (created automatically on first run — keep secret) |
 | `--trust-cert`  | —                                   | Generate CA cert (if needed) and install it as a trusted root CA              |
 | `--print-proxy` | —                                   | Print shell commands to set `HTTP_PROXY`/`HTTPS_PROXY` and exit               |
+| `--setup-shell` | —                                   | Append a conditional proxy snippet to your shell profile and exit             |
 | `--summary`     | —                                   | Print current-month usage summary and exit                                    |
 | `--prevmonth`   | —                                   | Print previous-month usage summary and exit                                   |
 | `--version`     | —                                   | Print the application version and exit                                        |
@@ -334,7 +378,7 @@ proxy, you need to:
 
 ```dockerfile
 USER root
-COPY ca.crt /usr/local/share/ca-certificates/copilot-logger.crt
+COPY ca.crt /usr/local/share/ca-certificates/copilot-usage-logger.crt
 RUN apk add --no-cache ca-certificates && update-ca-certificates
 ```
 
@@ -344,7 +388,7 @@ The cert **must** have a `.crt` extension for `update-ca-certificates` to pick i
 
 ```bash
 docker run \
-  -e SSL_CERT_FILE=/usr/local/share/ca-certificates/copilot-logger.crt \
+  -e SSL_CERT_FILE=/usr/local/share/ca-certificates/copilot-usage-logger.crt \
   -e HTTP_PROXY=http://host.docker.internal:8080 \
   -e HTTPS_PROXY=http://host.docker.internal:8080 \
   -e NO_PROXY=localhost,127.0.0.1 \
