@@ -1064,17 +1064,7 @@ func setupShell() {
 	proxyURL := "http://localhost" + *addr
 
 	if runtime.GOOS == "windows" {
-		// PowerShell profile
-		profileDir := filepath.Join(os.Getenv("USERPROFILE"), "Documents", "PowerShell")
-		profilePath := filepath.Join(profileDir, "Microsoft.PowerShell_profile.ps1")
-
 		const marker = "# copilot-usage-logger proxy"
-		existing, _ := os.ReadFile(profilePath)
-		if strings.Contains(string(existing), marker) {
-			fmt.Printf("Proxy snippet already present in %s\n", profilePath)
-			return
-		}
-
 		snippet := fmt.Sprintf(`
 %s
 Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned -Force
@@ -1086,18 +1076,32 @@ if (Test-NetConnection localhost -Port %s -InformationLevel Quiet -WarningAction
 }
 `, marker, strings.TrimPrefix(*addr, ":"), proxyURL, proxyURL, proxyURL, proxyURL)
 
-		if err := os.MkdirAll(profileDir, 0o755); err != nil {
-			log.Fatalf("Failed to create PowerShell profile directory: %v", err)
+		// Write to both PowerShell 7+ and Windows PowerShell 5 profile paths so
+		// the snippet is loaded regardless of which version the user runs.
+		profiles := []string{
+			filepath.Join(os.Getenv("USERPROFILE"), "Documents", "PowerShell", "Microsoft.PowerShell_profile.ps1"),
+			filepath.Join(os.Getenv("USERPROFILE"), "Documents", "WindowsPowerShell", "Microsoft.PowerShell_profile.ps1"),
 		}
-		f, err := os.OpenFile(profilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-		if err != nil {
-			log.Fatalf("Failed to open %s: %v", profilePath, err)
+		for _, profilePath := range profiles {
+			existing, _ := os.ReadFile(profilePath)
+			if strings.Contains(string(existing), marker) {
+				fmt.Printf("Proxy snippet already present in %s\n", profilePath)
+				continue
+			}
+			if err := os.MkdirAll(filepath.Dir(profilePath), 0o755); err != nil {
+				log.Fatalf("Failed to create profile directory: %v", err)
+			}
+			f, err := os.OpenFile(profilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+			if err != nil {
+				log.Fatalf("Failed to open %s: %v", profilePath, err)
+			}
+			_, werr := f.WriteString(snippet)
+			f.Close()
+			if werr != nil {
+				log.Fatalf("Failed to write to %s: %v", profilePath, werr)
+			}
+			fmt.Printf("Proxy snippet added to %s\n", profilePath)
 		}
-		defer f.Close()
-		if _, err := f.WriteString(snippet); err != nil {
-			log.Fatalf("Failed to write to %s: %v", profilePath, err)
-		}
-		fmt.Printf("Proxy snippet added to %s\n", profilePath)
 		fmt.Println("Restart PowerShell (or run `. $PROFILE`) to apply.")
 		return
 	}
