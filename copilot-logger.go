@@ -124,11 +124,11 @@ func init() {
 	doPrevMonth = flag.Bool("prevmonth", false, "print previous-month usage summary from persistent data store and exit")
 	doVersion = flag.Bool("version", false, "print the application version and exit")
 	doTrustCert = flag.Bool("trust-cert", false, "generate CA cert (if needed) and install it as a trusted root CA in the OS keychain")
-	doPrintProxy  = flag.Bool("print-proxy", false, "print shell export commands to configure HTTP_PROXY/HTTPS_PROXY and exit")
-	doSetupShell  = flag.Bool("setup-shell", false, "append a conditional proxy snippet to your shell profile (~/.zshrc, ~/.bashrc, or PowerShell $PROFILE) and exit")
+	doPrintProxy = flag.Bool("print-proxy", false, "print shell export commands to configure HTTP_PROXY/HTTPS_PROXY and exit")
+	doSetupShell = flag.Bool("setup-shell", false, "append a conditional proxy snippet to your shell profile (~/.zshrc, ~/.bashrc, or PowerShell $PROFILE) and exit")
 }
 
-const targetHost = "githubcopilot.com"
+const targetHost = "githubcopilot.com/chat/completions"
 
 // ── Model multipliers (official GitHub Copilot paid-plan billing weights) ────
 // Source: https://docs.github.com/en/copilot/managing-copilot/monitoring-usage-and-entitlements/about-premium-requests
