@@ -128,7 +128,7 @@ func init() {
 	doSetupShell = flag.Bool("setup-shell", false, "append a conditional proxy snippet to your shell profile (~/.zshrc, ~/.bashrc, or PowerShell $PROFILE) and exit")
 }
 
-const targetHost = "githubcopilot.com/chat/completions"
+const targetHost = "githubcopilot.com"
 
 // ── Model multipliers (official GitHub Copilot paid-plan billing weights) ────
 // Source: https://docs.github.com/en/copilot/managing-copilot/monitoring-usage-and-entitlements/about-premium-requests
@@ -766,7 +766,7 @@ func (p *proxy) handlePlain(w http.ResponseWriter, r *http.Request) {
 
 func (p *proxy) doRequest(w http.ResponseWriter, r *http.Request, scheme, host string) {
 	task := *taskName
-	isTarget := strings.Contains(host, targetHost)
+	isTarget := strings.Contains(host, targetHost) && strings.HasSuffix(r.URL.Path, "/chat/completions")
 
 	if isTarget && r.Method == http.MethodPost {
 		recordCall(task)
